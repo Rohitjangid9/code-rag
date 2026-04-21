@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Builds / installs
+build/
+dist/
+*.egg-info/
+
+# CCE data directory (indexes, DBs, checkpoints)
+.cce/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

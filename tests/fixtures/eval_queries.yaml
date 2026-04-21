@@ -1,0 +1,73 @@
+queries:
+  - id: user_class
+    query: "User model class definition"
+    expected_symbols:
+      - "models.User"
+    expected_files:
+      - "models.py"
+
+  - id: admin_user
+    query: "AdminUser subclass that overrides is_admin"
+    expected_symbols:
+      - "models.AdminUser"
+    expected_files:
+      - "models.py"
+
+  - id: create_user_function
+    query: "create a new user and persist it"
+    expected_symbols:
+      - "models.create_user"
+    expected_files:
+      - "models.py"
+
+  - id: get_user_by_email
+    query: "look up a user by their email address"
+    expected_symbols:
+      - "models.get_user_by_email"
+    expected_files:
+      - "models.py"
+
+  - id: full_name_method
+    query: "display name for a user"
+    expected_symbols:
+      - "models.User.full_name"
+    expected_files:
+      - "models.py"
+
+  - id: is_admin_check
+    query: "check if a user has admin privileges"
+    expected_symbols:
+      - "models.User.is_admin"
+      - "models.AdminUser.is_admin"
+    expected_files:
+      - "models.py"
+
+  - id: user_views
+    query: "register a new user from an HTTP request"
+    expected_symbols:
+      - "views.register"
+      - "views.UserView.post"
+    expected_files:
+      - "views.py"
+
+  - id: list_users_view
+    query: "return all users from the view layer"
+    expected_symbols:
+      - "views.list_users"
+    expected_files:
+      - "views.py"
+
+  - id: deactivate_admin
+    query: "deactivate an admin account"
+    expected_symbols:
+      - "models.AdminUser.deactivate"
+    expected_files:
+      - "models.py"
+
+  - id: user_view_get
+    query: "HTTP GET handler that returns a single user"
+    expected_symbols:
+      - "views.UserView.get"
+      - "views.get_user"
+    expected_files:
+      - "views.py"

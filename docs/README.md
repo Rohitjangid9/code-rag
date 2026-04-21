@@ -54,6 +54,8 @@ After `pip install -e ".[dev]"` and `cce index /path/to/repo`:
 | List symbols in one file | `cce symbols app/users/views.py` |
 | Find all callers of a symbol | `cce callers app.users.models.User.save` |
 | Show the N-hop subgraph around a symbol | `cce neighborhood app.users.models.User --depth 2` |
+| Resolve a URL to its handler + response model | `cce get-route "/api/v1/users/{user_id}"` |
+| Show the UI → API → handler → model chain | `cce get-api-flow "/api/v1/users/42"` |
 | Watch for file changes and re-index | `cce watch <path>` |
 | Start HTTP + MCP server | `cce serve` |
 | Export a Sourcegraph-compatible SCIP index | `cce export-scip <path> --out index.scip.json` |

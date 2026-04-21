@@ -1,39 +1,40 @@
 # API Reference
 
 `cce serve` boots a FastAPI app (factory: `cce.server.app:create_app`) that
-mounts six REST routers plus an MCP JSON-RPC endpoint. All request/response
-payloads are Pydantic models; full schemas live in Swagger at `/docs`.
+mounts six REST routers plus an MCP JSON-RPC endpoint. Every response model
+is a Pydantic class — full, typed schemas live in Swagger at `/docs`.
 
-Default base URL: `http://127.0.0.1:8765` (configurable via
+Default base URL: `http://127.0.0.1:8765` (change via
 `CCE_SERVER__HOST` / `CCE_SERVER__PORT`).
 
-## 1 · Health
+## 1 · Health — `cce/server/routes/health.py`
 
 | Method | Path | Purpose |
 |-------:|------|---------|
-| `GET`  | `/health` | Liveness probe. Returns `{"status": "ok"}`. |
+| `GET`  | `/health` | Liveness probe. |
 
-## 2 · Indexing — `/index/*`
+## 2 · Indexing — `/index/*` — `cce/server/routes/index.py`
 
 | Method | Path | Body / Query | Returns |
 |-------:|------|--------------|---------|
-| `POST` | `/index` | `{ "path": str, "layers": [str, …] }` | `IndexStatus` |
+| `POST` | `/index` | `IndexRequest { path: str, layers: list[str] }` | `IndexStatus` |
 | `GET`  | `/index/status` | — | `IndexStatus` |
 
 `IndexRequest.layers` defaults to `["lexical","symbols","graph","semantic"]`.
-The pipeline wiring behind these endpoints is active in later phases; the
-CLI (`cce index`) is the supported surface today.
+Both endpoints currently return HTTP `501` — the CLI (`cce index`) is the
+supported surface until the pipeline is wired through HTTP in a later phase.
 
-## 3 · Search — `/search`
+## 3 · Search — `/search` — `cce/server/routes/search.py`
 
 | Method | Path | Body | Returns |
 |-------:|------|------|---------|
-| `POST` | `/search` | `{ "query": str, "mode": "auto"\|"lexical"\|"semantic"\|"hybrid", "k": int, "filters": dict? }` | `list[Hit]` |
+| `POST` | `/search` | `SearchRequest { query, mode, k, filters? }` | `SearchResponse { query, mode, hits: [Hit] }` |
 
-A `Hit` has `node` (full `Node` or null), `path`, `line_start`, `line_end`,
-`snippet`, `score`, and `provenance ∈ {lex, vec, graph, hybrid}`.
+`mode ∈ {"auto", "lexical", "semantic", "hybrid"}` (default `"auto"`).
+A `Hit` = `{ node?: Node, path, line_start, line_end, snippet, score,
+provenance: "lex" | "vec" | "graph" | "hybrid" }`.
 
-## 4 · Symbols — `/symbols/*`
+## 4 · Symbols — `/symbols/*` — `cce/server/routes/symbols.py`
 
 | Method | Path | Query | Returns |
 |-------:|------|-------|---------|
@@ -43,46 +44,51 @@ A `Hit` has `node` (full `Node` or null), `path`, `line_start`, `line_end`,
 | `GET` | `/symbols/implementations` | `qname: str` | `list[Node]` |
 | `GET` | `/symbols/{qualified_name:path}` | — | `Node` (404 if absent) |
 
-`{qualified_name:path}` accepts dots and slashes, so
-`/symbols/app.users.views.UserViewSet` and
-`/symbols/app/users/views.py::UserViewSet` both work.
+The `:path` converter on the last route lets dots and slashes appear in the
+qualified name (e.g. `/symbols/app.users.views.UserViewSet`).
 
-## 5 · Graph — `/graph/*`
+## 5 · Graph — `/graph/*` — `cce/server/routes/graph.py`
 
-| Method | Path | Query / Body | Returns |
-|-------:|------|--------------|---------|
-| `GET` | `/graph/neighborhood` | `qname: str, depth: int=2, edge_kinds: list[str]?` | `SubGraph` |
-| `GET` | `/graph/route` | `pattern_or_path: str` | `RouteInfo` |
-| `GET` | `/graph/component` | `component_name: str` | `ComponentTree` |
-| `GET` | `/graph/api-flow` | `route_or_component: str` | `CrossStackFlow` |
+| Method | Path | Query | Returns |
+|-------:|------|-------|---------|
+| `GET` | `/graph/neighborhood` | `qname: str, depth: int = 2` | `SubGraph` |
+| `GET` | `/graph/route` | `pattern: str` | `RouteInfo` |
+| `GET` | `/graph/component` | `name: str` | `ComponentTree` |
+| `GET` | `/graph/api-flow` | `anchor: str` | `CrossStackFlow` |
 
-`SubGraph = { root_id, nodes: [Node], edges: [Edge] }`.
-`RouteInfo = { pattern, methods, handler_qname, framework, request_model?, response_model? }`.
-`ComponentTree = { component_qname, children: [str], hooks: [str], props: [str] }`.
-`CrossStackFlow = { anchor, steps: [{kind, name, file?, line?, framework?, methods?}] }`.
+Shapes (from `cce.retrieval.tools`):
 
-## 6 · Agent — `/agent/*`
+```
+SubGraph       = { root_id, nodes: [Node], edges: [Edge] }
+RouteInfo      = { pattern, methods: [str], handler_qname, framework,
+                   request_model?, response_model? }
+ComponentTree  = { component_qname, children: [str], hooks: [str], props: [str] }
+CrossStackFlow = { anchor, steps: [ {kind, name, file?, line?,
+                                     framework?, methods?} ] }
+```
+
+## 6 · Agent — `/agent/*` — `cce/server/routes/agent.py`
 
 | Method | Path | Body | Returns |
 |-------:|------|------|---------|
-| `POST` | `/agent/query` | `{ "query": str, "thread_id": str? }` | SSE stream of LangGraph events (tokens, tool calls, final answer) |
+| `POST` | `/agent/query`  | `AgentQuery { query, thread_id?: str }` | `AgentResponse { answer, citations: [dict], reasoning_steps: [str] }` — synchronous, single JSON reply. |
+| `POST` | `/agent/stream` | `AgentQuery` | **Server-Sent Events** stream of LangGraph `astream_events(version="v2")` output. |
 
-The stream follows LangGraph's event envelope (`messages`,
-`on_tool_start`, `on_tool_end`, `on_chain_end`). `thread_id` selects a
-checkpointer thread so you can resume a conversation; checkpointer backend is
-chosen by `CCE_AGENT__CHECKPOINTER` (`memory` | `sqlite`).
+`thread_id` (default `"default"`) selects the LangGraph checkpointer thread
+so conversations resume. The checkpointer backend is set by
+`CCE_AGENT__CHECKPOINTER` (`sqlite` or `memory`).
 
-## 7 · MCP — `/mcp` (JSON-RPC 2.0)
+## 7 · MCP — `/mcp`, `/mcp/tools` — `cce/server/mcp.py`
 
-`cce` speaks **Model Context Protocol (2024-11)** so Claude Desktop, Cursor,
-Continue, and anything else MCP-aware can use its tools directly.
+`cce` speaks **Model Context Protocol (2024-11-05)** so Claude Desktop,
+Cursor, Continue, and anything else MCP-aware can use its tools directly.
 
 | Method | Path | Purpose |
 |-------:|------|---------|
-| `GET`  | `/mcp/tools` | Returns the raw list of MCP tool descriptors (`name`, `description`, `inputSchema`). Useful for debugging. |
-| `POST` | `/mcp` | JSON-RPC 2.0 entry point. Supported methods: `initialize`, `tools/list`, `tools/call`. |
+| `GET`  | `/mcp/tools` | Returns `{tools: [{name, description, inputSchema}, …]}`. Convenience endpoint (not part of the spec). |
+| `POST` | `/mcp` | JSON-RPC 2.0 entry point. Supported methods: `initialize`, `tools/list`, `tools/call`. Unknown methods return RPC error `-32601`. |
 
-The exposed tool set (`cce.agents.tools.ALL_TOOLS`):
+The exposed tool set is `cce.agents.tools.ALL_TOOLS`:
 
 | Tool | What it does |
 |------|--------------|
@@ -90,11 +96,11 @@ The exposed tool set (`cce.agents.tools.ALL_TOOLS`):
 | `get_symbol` | Full record for a qualified symbol name. |
 | `get_file_outline` | All symbols defined in a file. |
 | `find_callers` | Callers of a symbol. |
-| `find_references` | Source locations that reference a symbol. |
+| `find_references` | Source locations referencing a symbol. |
 | `get_neighborhood` | N-hop subgraph around a symbol. |
 | `get_route` | URL pattern → handler + response model (Django/FastAPI). |
 | `get_component_tree` | React component → children + hooks + props. |
-| `get_api_flow` | Anchor → Route → Handler → Model chain across frontend and backend. |
+| `get_api_flow` | Anchor → Route → Handler → Model chain across stacks. |
 
 ### `tools/call` example
 
@@ -112,9 +118,10 @@ curl -s http://127.0.0.1:8765/mcp \
   }'
 ```
 
-### Register with Claude Desktop / Cursor / Continue
+The response `result.content[0].text` is a JSON-stringified version of the
+tool return value. `isError: true` signals a tool failure.
 
-Point the client at the HTTP transport:
+### Registering with MCP clients
 
 ```json
 {
@@ -124,27 +131,27 @@ Point the client at the HTTP transport:
 }
 ```
 
-A future release will add a stdio transport (`cce serve --mcp`) for clients
-that require subprocess MCP servers.
+Only HTTP transport is supported today; stdio transport is not implemented.
 
 ## 8 · CORS
 
-CORS is enabled via `CCE_SERVER__CORS_ORIGINS` (defaults to `["*"]`), with
-credentials, methods, and headers fully open. Tighten for production.
+`CORSMiddleware` is added with `CCE_SERVER__CORS_ORIGINS` (default `["*"]`),
+`allow_credentials=True`, and all methods / headers open. Tighten in
+production deployments.
 
 ## 9 · Error shape
 
-Every route raises `HTTPException` with a JSON body `{ "detail": str }`:
+Routes raise `HTTPException` with body `{ "detail": str }`:
 
 | Status | Meaning |
 |-------:|---------|
 | `404` | Symbol / route / component not found. |
 | `422` | Pydantic validation error on query or body. |
-| `501` | Endpoint reserved for a later build phase. |
+| `501` | Endpoint reserved for a later build phase (today: the `/index/*` routes). |
 | `500` | Unhandled error; check server logs. |
 
 ## 10 · Authentication
 
-None in v1 — `cce serve` is intended for loopback use. Put it behind a
-reverse proxy or add dependency-injected auth in
-`cce.server.deps` if you expose it on a network.
+None in v1 — `cce serve` binds to loopback by default. Put it behind a
+reverse proxy or wire dependency-injected auth via `cce/server/deps.py` if
+you expose it on a network.

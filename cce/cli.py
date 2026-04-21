@@ -399,9 +399,12 @@ def doctor() -> None:
 def serve(
     host: str | None = typer.Option(None),
     port: int | None = typer.Option(None),
-    mcp: bool = typer.Option(False, help="Expose tools over Model Context Protocol."),
 ) -> None:
-    """Start the FastAPI (and optional MCP) server."""
+    """Start the FastAPI server.
+
+    The MCP (Model Context Protocol) JSON-RPC endpoint is always mounted at
+    POST /mcp and GET /mcp/tools — no flag required.
+    """
     import uvicorn
 
     settings = get_settings()
@@ -412,6 +415,34 @@ def serve(
         factory=True,
         reload=False,
     )
+
+
+# ── Phase 6 framework tools ───────────────────────────────────────────────────
+
+@app.command("get-route")
+def get_route_cmd(
+    pattern_or_path: str = typer.Argument(..., help="URL pattern or concrete path."),
+) -> None:
+    """Resolve a URL pattern or concrete path to its handler + response model."""
+    from cce.retrieval.tools import get_route  # noqa: PLC0415
+
+    try:
+        info = get_route(pattern_or_path)
+    except KeyError as exc:
+        console.print(f"[red]Not found:[/] {exc}")
+        raise typer.Exit(1)
+    console.print_json(info.model_dump_json(indent=2))
+
+
+@app.command("get-api-flow")
+def get_api_flow_cmd(
+    route_or_component: str = typer.Argument(..., help="Route path, pattern, or component name."),
+) -> None:
+    """Return the UI → API → handler → model chain for the given anchor."""
+    from cce.retrieval.tools import get_api_flow  # noqa: PLC0415
+
+    flow = get_api_flow(route_or_component)
+    console.print_json(flow.model_dump_json(indent=2))
 
 
 @app.command()

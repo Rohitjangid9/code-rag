@@ -100,14 +100,27 @@ Runs the retrieval evaluation harness against a YAML gold set (see
 `tests/fixtures/` for examples). Reports MRR@k, Recall@k, nDCG@k, and a
 provenance breakdown as a Rich table. `--k` defaults to `10`.
 
+## Framework navigation (Phase 6)
+
+### `cce get-route <pattern_or_path>`
+Resolve a URL pattern or concrete path to its handler + response model.
+Matches both exact patterns (`/users/{user_id}`) and concrete paths (the
+engine normalises `/api/v1/users/42` → `/users/{id}` before matching).
+Prints a `RouteInfo` JSON object; exits `1` if no route matches.
+
+### `cce get-api-flow <route_or_component>`
+Returns the UI → API → handler → response-model chain for the given anchor
+as a `CrossStackFlow` JSON object. Works on route patterns, concrete URLs,
+or component names — the engine walks `ROUTES_TO` and resolves the response
+model through the symbol store.
+
 ## Serve
 
-### `cce serve [--host] [--port] [--mcp]`
+### `cce serve [--host] [--port]`
 Starts the FastAPI app via `uvicorn` using the factory
 `cce.server.app:create_app`. Defaults come from
 `CCE_SERVER__HOST` / `CCE_SERVER__PORT` (`127.0.0.1:8765`). The MCP endpoint
-is always mounted at `POST /mcp`; the `--mcp` flag is reserved for a future
-stdio MCP mode.
+is always mounted at `POST /mcp` (no flag required).
 
 - Swagger UI: `http://127.0.0.1:8765/docs`
 - OpenAPI JSON: `http://127.0.0.1:8765/openapi.json`
@@ -139,6 +152,10 @@ cce symbols ./webapp/apps/users/views.py
 cce get apps.users.views.UserViewSet.retrieve
 cce callers apps.users.models.User.save
 cce neighborhood apps.users.models.User --depth 3
+
+# Framework navigation
+cce get-route "/api/v1/users/{user_id}"
+cce get-api-flow "/api/v1/users/42"
 
 # Keep the index fresh while you code
 cce watch ./webapp

@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class PathsSettings(BaseSettings):
     """Filesystem locations used by the engine."""
 
-    model_config = SettingsConfigDict(env_prefix="CCE_PATHS_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="CCE_PATHS__", extra="ignore")
 
     data_dir: Path = Field(default=Path(".cce"), description="Root for all indexes/DBs.")
     sqlite_db: Path = Field(default=Path(".cce/index.sqlite"))
@@ -48,7 +48,7 @@ class EmbedderSettings(BaseSettings):
 class QdrantSettings(BaseSettings):
     """Qdrant vector store configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="CCE_QDRANT_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="CCE_QDRANT__", extra="ignore")
 
     mode: Literal["embedded", "remote"] = "embedded"
     url: str | None = None
@@ -59,7 +59,7 @@ class QdrantSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     """LangGraph agent runtime configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="CCE_AGENT_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="CCE_AGENT__", extra="ignore")
 
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     llm_model: str = "gpt-4o-mini"
@@ -72,7 +72,7 @@ class AgentSettings(BaseSettings):
 class ServerSettings(BaseSettings):
     """HTTP server configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="CCE_SERVER_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="CCE_SERVER__", extra="ignore")
 
     host: str = "127.0.0.1"
     port: int = 8765
@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_prefix="CCE_",
         env_nested_delimiter="__",
         extra="ignore",
     )

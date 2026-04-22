@@ -71,7 +71,7 @@ def test_upsert_edge_no_duplicate(populated_stores):
         next(q for q in sym_store.list_qnames() if q.endswith("User") and "Admin" not in q)
     )
     admin = sym_store.get_by_qname(
-        next(q for q in sym_store.list_qnames() if "AdminUser" in q and "." not in q.split("AdminUser")[0][-1:])
+        next(q for q in sym_store.list_qnames() if q.endswith("AdminUser"))
     )
     if user and admin:
         graph_store.upsert_edge(user.id, admin.id, EdgeKind.INHERITS)

@@ -132,7 +132,15 @@ def _heuristic_python(parsed: ParsedFile, root: Path) -> list[RawEdge]:
             fn = node.child_by_field_name("function")
             if fn:
                 name = _text(fn, src_bytes).strip()
-                if "." in name or name[0].isupper():
+                # heuristic: include all non-builtin function calls
+                if name not in {"len", "print", "range", "enumerate", "zip", "map", "filter",
+                                "int", "str", "list", "dict", "set", "tuple", "bool", "float",
+                                "type", "isinstance", "hasattr", "getattr", "super", "open",
+                                "max", "min", "sum", "abs", "round", "divmod", "pow",
+                                "sorted", "reversed", "iter", "next", "all", "any",
+                                "globals", "locals", "vars", "dir", "help", "repr",
+                                "format", "hex", "oct", "bin", "chr", "ord", "ascii",
+                                "callable", "classmethod", "staticmethod", "property"}:
                     edges.append(RawEdge(
                         src_id=src_id,
                         dst_qualified_name=name,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from cce.graph.schema import Node
@@ -117,6 +118,19 @@ class SymbolStore:
         return [_row_to_node(r) for r in rows]
 
     def search(self, query: str, k: int = 20) -> list[SymbolHit]:
+        # Sanitize for FTS5: drop characters that confuse the query parser
+        # while keeping word chars and * for prefix matching.
+        # For multi-token queries we join with OR so any matching symbol is
+        # returned; single-token queries stay as-is ( FTS5 will tokenise
+        # on underscores / dots etc. via unicode61).
+        tokens = re.findall(r"[\w*]+", query)
+        tokens = [t for t in tokens if len(t) > 1 or "*" in t]
+        if not tokens:
+            return []
+        if len(tokens) > 1:
+            safe = " OR ".join(tokens)
+        else:
+            safe = tokens[0]
         rows = self._db.conn.execute(
             """
             SELECT s.*, f.rank
@@ -126,7 +140,7 @@ class SymbolStore:
             ORDER BY f.rank
             LIMIT ?
             """,
-            (query, k),
+            (safe, k),
         ).fetchall()
         return [SymbolHit(node=_row_to_node(r), rank=r["rank"], match_field="fts") for r in rows]
 

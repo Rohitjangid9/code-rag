@@ -101,12 +101,16 @@ async def test_agent_ainvoke_with_mock_llm():
     from langchain_core.messages import AIMessage  # noqa: PLC0415
     from cce.agents.graph import get_agent_graph  # noqa: PLC0415
 
+    get_agent_graph.cache_clear()
     stub_resp = AIMessage(content="Auth is handled in middleware")
     with patch("cce.agents.nodes.get_llm") as mock_llm:
         mock_llm.return_value.bind_tools.return_value.invoke.return_value = stub_resp
         mock_llm.return_value.invoke.return_value = stub_resp
         app = get_agent_graph()
-        result = await app.ainvoke({"query": "how is auth handled?", "messages": []})
+        result = await app.ainvoke(
+            {"query": "how is auth handled?", "messages": []},
+            config={"configurable": {"thread_id": "test-thread"}},
+        )
     assert "answer" in result
 
 

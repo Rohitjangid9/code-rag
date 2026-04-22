@@ -20,13 +20,18 @@ class VectorStore:
 
     def __init__(self, settings: Settings) -> None:
         from qdrant_client import QdrantClient  # noqa: PLC0415
+        from cce.embeddings.embedder import _resolve  # noqa: PLC0415
 
         cfg = settings.qdrant
         if cfg.mode == "embedded":
             self._client = QdrantClient(path=str(settings.paths.qdrant_path))
         else:
             self._client = QdrantClient(url=cfg.url, api_key=cfg.api_key)
-        self._dim = settings.embedder.dim
+        # Resolve auto (dim=0) against the embedder's canonical table so the
+        # Qdrant collection is created with the correct vector size.
+        _, self._dim = _resolve(
+            settings.embedder.backend, settings.embedder.model_name, settings.embedder.dim,
+        )
         self._settings = settings
 
     # ── Collection management ─────────────────────────────────────────────────

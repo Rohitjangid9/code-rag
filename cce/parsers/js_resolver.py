@@ -66,7 +66,7 @@ def resolve_js_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
                         line=line, confidence=0.5, resolver_method="heuristic",
                     ))
 
-        elif is_tsx_jsx and t == "jsx_opening_element":
+        elif is_tsx_jsx and t in ("jsx_opening_element", "jsx_self_closing_element"):
             name_node = node.child_by_field_name("name")
             if name_node:
                 name = _text(name_node, src_bytes).strip()
@@ -79,7 +79,7 @@ def resolve_js_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
                         line=line, confidence=0.85, resolver_method="heuristic",
                     ))
 
-        elif t == "string" and parsed.source[node.start_byte:node.end_byte].decode("utf-8", "replace").startswith(("'/api", '"/api')):
+        elif t == "string" and src_bytes[node.start_byte:node.end_byte].decode("utf-8", "replace").startswith(("'/api", '"/api')):
             line = node.start_point[0] + 1
             api_path = _text(node, src_bytes).strip("\"'")
             caller_qname = _caller(line)

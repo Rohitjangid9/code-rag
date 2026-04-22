@@ -37,11 +37,11 @@ def test_can_handle_main_py(extractor):
     assert extractor.can_handle(path, source)
 
 
-def test_cannot_handle_models_py(extractor):
+def test_can_handle_models_py(extractor):
     path = FIXTURES / "models.py"
     source = path.read_text(encoding="utf-8", errors="ignore")
-    # models.py has no FastAPI/APIRouter
-    assert not extractor.can_handle(path, source)
+    # models.py contains Pydantic BaseModel classes that the FastAPI extractor handles
+    assert extractor.can_handle(path, source)
 
 
 # ── Route extraction ───────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from cce.agents.llm import get_llm, get_system_message
 from cce.agents.state import AgentState
 from cce.config import get_settings
 from cce.logging import get_logger
@@ -19,7 +20,6 @@ log = get_logger(__name__)
 
 def planner_node(state: AgentState) -> AgentState:
     """Invoke the LLM (with tools bound). Emits tool_calls or a plain text reply."""
-    from cce.agents.llm import get_llm, get_system_message  # noqa: PLC0415
     from cce.agents.tools import ALL_TOOLS  # noqa: PLC0415
 
     messages = list(state.get("messages", []))
@@ -99,8 +99,6 @@ def responder_node(state: AgentState) -> AgentState:
     Before calling the LLM, trims retrieved_context to max_context_items and
     guards against the message history exceeding _MAX_CONTEXT_WORDS.
     """
-    from cce.agents.llm import get_llm, get_system_message  # noqa: PLC0415
-
     # ── Budget: trim retrieved_context ────────────────────────────────────────
     max_items: int = state.get("max_context_items", 20)
     context = state.get("retrieved_context", [])

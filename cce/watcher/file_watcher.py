@@ -13,6 +13,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from cce.hashing import delete_file_records
 from cce.logging import get_logger
 
 log = get_logger(__name__)
@@ -83,7 +84,6 @@ class CodeChangeHandler(FileSystemEventHandler):
             return
 
         if action == "delete":
-            from cce.hashing import delete_file_records  # noqa: PLC0415
             delete_file_records(rel, self._pipeline.symbol_store._db)
             log.info("Watcher: deleted %s", rel)
         else:

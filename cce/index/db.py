@@ -121,10 +121,7 @@ class DatabaseManager:
         return self._conn
 
     def _run_schema(self) -> None:
-        for stmt in _SCHEMA.split(";"):
-            stmt = stmt.strip()
-            if stmt:
-                self._conn.execute(stmt)  # type: ignore[union-attr]
+        self._conn.executescript(_SCHEMA)  # type: ignore[union-attr]
         self._conn.commit()  # type: ignore[union-attr]
 
     def close(self) -> None:

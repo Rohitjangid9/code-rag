@@ -10,6 +10,7 @@ from rich.table import Table
 from cce.eval.dataset import EvalDataset, EvalQuery
 from cce.eval.metrics import mean_ndcg_at_k, mean_recall_at_k, mrr_at_k
 from cce.logging import get_logger
+from cce.retrieval.tools import search_code
 
 log = get_logger(__name__)
 
@@ -64,8 +65,6 @@ class EvalHarness:
 
     def run(self, dataset: EvalDataset) -> EvalReport:
         """Evaluate all queries in *dataset* and return an EvalReport."""
-        from cce.retrieval.tools import search_code  # noqa: PLC0415
-
         query_results: list[QueryResult] = []
         sym_pairs: list[tuple[list[str], set[str]]] = []
         file_pairs: list[tuple[list[str], set[str]]] = []

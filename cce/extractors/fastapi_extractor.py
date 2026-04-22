@@ -29,10 +29,12 @@ class FastAPIExtractor:
 
     def can_handle(self, path: Path, source: str) -> bool:
         return (
-            "FastAPI" in source
-            or "APIRouter" in source
+            "FastAPI(" in source
+            or "APIRouter(" in source
             or "@app." in source
             or "@router." in source
+            or "BaseModel" in source
+            or "from pydantic" in source
         )
 
     def extract(self, path: Path, rel_path: str, source: str) -> ExtractedData:
@@ -54,9 +56,14 @@ class FastAPIExtractor:
 
     # ── Router variable discovery ─────────────────────────────────────────────
 
-    def _collect_router_vars(self, root, src: bytes) -> dict[str, str]:
-        """Return {var_name: 'app'|'router'} for FastAPI()/APIRouter() assignments."""
-        vars_: dict[str, str] = {}
+    def _collect_router_vars(self, root, src: bytes) -> dict[str, dict]:
+        """Return {var_name: {'kind': 'app'|'router', 'prefix': str}}.
+
+        The ``prefix`` is the ``prefix=...`` kwarg passed to ``APIRouter(...)`` /
+        ``FastAPI(...)``; empty string when absent. Routes declared against a
+        router with a prefix get that prefix prepended to their ``meta.path``.
+        """
+        vars_: dict[str, dict] = {}
         for node in root.children:
             if node.type != "expression_statement":
                 continue
@@ -72,16 +79,23 @@ class FastAPIExtractor:
                     continue
                 fn_name = _text(fn, src).strip()
                 var_name = _text(lhs, src).strip()
+                call_text = _text(rhs, src)
+                pm = re.search(r"""prefix\s*=\s*['"]([^'"]*)['"]""", call_text)
+                prefix = pm.group(1) if pm else ""
                 if fn_name == "FastAPI":
-                    vars_[var_name] = "app"
+                    vars_[var_name] = {"kind": "app", "prefix": prefix}
                 elif fn_name in ("APIRouter", "router"):
-                    vars_[var_name] = "router"
+                    vars_[var_name] = {"kind": "router", "prefix": prefix}
         return vars_
 
     # ── Route extraction ──────────────────────────────────────────────────────
 
     def _extract_routes(self, root, src: bytes, rel_path: str, mod: str,
-                        router_vars: dict[str, str], data: ExtractedData) -> None:
+                        router_vars: dict[str, dict], data: ExtractedData) -> None:
+        # Router var → include_router prefix (discovered from
+        # `app.include_router(users_router, prefix="/api/v1")`).
+        include_prefixes = self._collect_include_prefixes(root, src)
+
         for node in root.children:
             if node.type != "decorated_definition":
                 continue
@@ -105,25 +119,33 @@ class FastAPIExtractor:
                 fn_name = _text(fn_name_node, src)
                 fn_qname = f"{mod}.{fn_name}"
                 fn_id = _node_id_from_qname(fn_qname)
-                route_path = route_meta.get("path", "/")
+                local_path = route_meta.get("path", "/")
+                router_var = route_meta.get("router_var", "")
                 methods = route_meta.get("methods", [])
                 response_model = route_meta.get("response_model")
 
-                qname = f"{mod}.route.{re.sub(r'[^a-zA-Z0-9_]', '_', route_path)}.{'_'.join(methods)}"
+                # Build the effective path: include_router.prefix + router.prefix + local.
+                router_prefix = router_vars.get(router_var, {}).get("prefix", "")
+                include_prefix = include_prefixes.get(router_var, "")
+                full_path = _join_paths(include_prefix, router_prefix, local_path)
+
+                qname = f"{mod}.route.{re.sub(r'[^a-zA-Z0-9_]', '_', full_path)}.{'_'.join(methods)}"
                 route_id = _node_id_from_qname(qname)
 
                 data.nodes.append(Node(
                     id=route_id,
                     kind=NodeKind.ROUTE,
                     qualified_name=qname,
-                    name=route_path,
+                    name=full_path,
                     file_path=rel_path,
                     line_start=child.start_point[0] + 1,
                     line_end=child.end_point[0] + 1,
                     language=_PY,
                     framework_tag=FrameworkTag.FASTAPI,
                     meta={
-                        "path": route_path,
+                        "path": full_path,
+                        "local_path": local_path,
+                        "router_var": router_var,
                         "methods": methods,
                         "response_model": response_model,
                         "handler": fn_qname,
@@ -139,18 +161,40 @@ class FastAPIExtractor:
                 # Extract Depends() from parameters
                 self._extract_depends(child, src, fn_id, rel_path, data)
 
+    def _collect_include_prefixes(self, root, src: bytes) -> dict[str, str]:
+        """Scan `app.include_router(router, prefix="/api/v1")` calls."""
+        full = src.decode("utf-8", errors="replace")
+        prefixes: dict[str, str] = {}
+        for m in re.finditer(
+            r"\w+\.include_router\(\s*(\w+)\s*(?:,\s*prefix\s*=\s*['\"]([^'\"]*)['\"])?",
+            full,
+        ):
+            router_var, prefix = m.group(1), m.group(2) or ""
+            if prefix:
+                prefixes[router_var] = prefix
+        return prefixes
+
     def _parse_route_decorator(self, dec_node, src: bytes, router_vars: dict) -> dict | None:
-        """Parse @app.get('/path', response_model=X) → {path, methods, response_model}."""
+        """Parse @app.get('/path', response_model=X) → {path, methods, response_model, router_var}."""
         dec_text = _text(dec_node, src).lstrip("@").strip()
-        for var, _ in router_vars.items():
+        for var in router_vars:
             for method in _HTTP_METHODS:
                 prefix = f"{var}.{method}"
                 if dec_text.startswith(prefix):
                     m = re.search(r"""['"]([^'"]+)['"]""", dec_text)
                     path = m.group(1) if m else "/"
-                    rm = re.search(r"response_model\s*=\s*(\w[\w\[\], ]*)", dec_text)
+                    # Match an identifier optionally followed by one level of
+                    # [...] — stop before the next kwarg or the closing paren.
+                    rm = re.search(
+                        r"response_model\s*=\s*([\w\.]+(?:\[[^\]]*\])?)", dec_text,
+                    )
                     response_model = rm.group(1).strip() if rm else None
-                    return {"path": path, "methods": [method.upper()], "response_model": response_model}
+                    return {
+                        "path": path,
+                        "methods": [method.upper()],
+                        "response_model": response_model,
+                        "router_var": var,
+                    }
         return None
 
     # ── Depends extraction ────────────────────────────────────────────────────
@@ -214,3 +258,22 @@ class FastAPIExtractor:
                 line=line,
                 confidence=0.9,
             ))
+
+
+def _join_paths(*parts: str) -> str:
+    """Join URL-path segments, preserving an intentional trailing slash.
+
+    ``_join_paths("/api/v1", "/users", "/")``   -> ``"/api/v1/users/"``
+    ``_join_paths("/api/v1", "/users", "")``    -> ``"/api/v1/users"``
+    ``_join_paths("", "/users", "{id}")``       -> ``"/users/{id}"``
+    ``_join_paths("/api", "", "")``             -> ``"/api"``
+    """
+    cleaned = [p for p in parts if p]
+    if not cleaned:
+        return "/"
+    last = cleaned[-1]
+    segments = [seg for p in cleaned for seg in p.split("/") if seg]
+    path = "/" + "/".join(segments) if segments else "/"
+    if last.endswith("/") and path != "/":
+        path += "/"
+    return path

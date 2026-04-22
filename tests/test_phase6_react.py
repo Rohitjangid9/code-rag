@@ -65,10 +65,17 @@ def test_route_renders_edge(extractor):
 
 def test_route_component_in_meta(extractor):
     data = _extract(extractor, "App.tsx")
-    for route in (n for n in data.nodes if n.kind == NodeKind.ROUTE):
-        # At least some routes should have a component name
-        if route.meta.get("component"):
-            assert route.meta["component"][0].isupper()  # PascalCase
+    components = [
+        route.meta.get("component")
+        for route in data.nodes
+        if route.kind == NodeKind.ROUTE
+    ]
+    components = [c for c in components if c]
+    # At least one route must render a PascalCase (user-defined) component;
+    # HTML elements like `div` are allowed as route components but don't count.
+    assert any(c[0].isalpha() and c[0].isupper() for c in components), (
+        f"expected at least one PascalCase component in {components}"
+    )
 
 
 # ── CALLS_API cross-stack edges ────────────────────────────────────────────────

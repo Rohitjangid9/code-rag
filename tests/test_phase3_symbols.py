@@ -78,7 +78,7 @@ def test_python_inherits_edge(parser):
     from cce.graph.schema import EdgeKind  # noqa: PLC0415
     inherits = [e for e in pf.raw_edges if e.kind == EdgeKind.INHERITS]
     dst_names = {e.dst_qualified_name for e in inherits}
-    assert "User" in dst_names   # AdminUser inherits User
+    assert "models.User" in dst_names   # AdminUser inherits models.User
 
 
 def test_qualified_name_structure(parser):

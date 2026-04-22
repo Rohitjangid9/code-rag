@@ -56,20 +56,20 @@ def test_rrf_k_parameter_shifts_scores():
 # ── HybridRetriever unit (mocked stores) ──────────────────────────────────────
 
 def _make_mock_node(node_id: str, name: str, path: str = "app/views.py"):
-    from cce.graph.schema import Language, NodeKind  # noqa: PLC0415
-    node = MagicMock()
-    node.id = node_id
-    node.name = name
-    node.kind = NodeKind.FUNCTION
-    node.file_path = path
-    node.line_start = 1
-    node.line_end = 10
-    node.language = Language.PYTHON
-    node.framework_tag = None
-    node.docstring = None
-    node.signature = f"def {name}():"
-    node.qualified_name = f"app.views.{name}"
-    return node
+    from cce.graph.schema import Language, Node, NodeKind  # noqa: PLC0415
+    return Node(
+        id=node_id,
+        kind=NodeKind.FUNCTION,
+        qualified_name=f"app.views.{name}",
+        name=name,
+        file_path=path,
+        line_start=1,
+        line_end=10,
+        signature=f"def {name}():",
+        docstring=None,
+        language=Language.PYTHON,
+        framework_tag=None,
+    )
 
 
 def _make_retriever(sym_results=None, lex_results=None):

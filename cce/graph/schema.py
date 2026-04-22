@@ -99,3 +99,9 @@ class Chunk(BaseModel):
     header: str
     body: str
     token_count: int = 0
+
+
+class SubGraph(BaseModel):
+    root_id: str
+    nodes: list[Node] = Field(default_factory=list)
+    edges: list[Edge] = Field(default_factory=list)

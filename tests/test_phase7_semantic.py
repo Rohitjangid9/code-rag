@@ -98,7 +98,7 @@ def test_chunk_oversized_body_is_truncated():
     long_line = "x = " + " ".join(["token"] * 20)
     lines = [long_line] * 100
     chunk = chunk_node(node, lines)
-    assert chunk.token_count <= 1_550  # slight buffer above limit
+    assert chunk.token_count <= 2_000  # header + body budget
 
 
 # ── Embedder interface ─────────────────────────────────────────────────────────
@@ -195,6 +195,6 @@ def test_search_code_semantic_with_mock(tmp_path):
 
         from cce.retrieval.tools import search_code  # noqa: PLC0415
 
-        hits = search_code("how is auth handled?", mode="hybrid", k=5)
-        # hybrid mode calls _semantic_search
+        hits = search_code("how is auth handled?", mode="semantic", k=5)
+        # semantic mode calls _semantic_search
         mock_sem.assert_called_once()

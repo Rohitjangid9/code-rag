@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from cce.graph.schema import Edge, EdgeKind, Location, Node
+from cce.graph.schema import Edge, EdgeKind, Location, Node, SubGraph
 
 
 # ── Response models (stable public API) ───────────────────────────────────────
@@ -24,12 +24,6 @@ class Hit(BaseModel):
     snippet: str
     score: float
     provenance: Literal["lex", "vec", "graph", "hybrid"] = "hybrid"
-
-
-class SubGraph(BaseModel):
-    root_id: str
-    nodes: list[Node] = Field(default_factory=list)
-    edges: list[Edge] = Field(default_factory=list)
 
 
 class RouteInfo(BaseModel):
@@ -94,7 +88,8 @@ def search_code(
 
     if mode == "lexical":
         p = _pipeline()
-        hits = []
+        hits: list[Hit] = []
+        seen_paths: set[str] = set()
         for sh in p.symbol_store.search(query, k=k):
             hits.append(Hit(
                 node=sh.node, path=sh.node.file_path,
@@ -102,7 +97,16 @@ def search_code(
                 snippet=sh.node.signature or sh.node.name,
                 score=abs(sh.rank), provenance="lex",
             ))
-        return hits
+            seen_paths.add(sh.node.file_path)
+        for lh in p.lexical_store.search(query, k=k):
+            if lh.path not in seen_paths:
+                hits.append(Hit(
+                    node=None, path=lh.path,
+                    line_start=0, line_end=0,
+                    snippet=lh.snippet,
+                    score=abs(lh.rank), provenance="lex",
+                ))
+        return hits[:k]
 
     # hybrid / auto — use HybridRetriever (Phase 8)
     try:
@@ -306,14 +310,20 @@ def get_api_flow(route_or_component: str) -> CrossStackFlow:
                                "file": handler.file_path, "line": handler.line_start})
                 if route.response_model:
                     from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
-                    model = p.symbol_store.get_by_qname(route.response_model)
-                    if not model:
+                    # Peel off common generic wrappers so `list[UserResponse]`
+                    # and `Optional[UserResponse]` still resolve to the model.
+                    candidates = _extract_model_candidates(route.response_model)
+                    model = None
+                    for cand in candidates:
+                        model = p.symbol_store.get_by_qname(cand)
+                        if model:
+                            break
                         rows = conn.execute(
-                            "SELECT * FROM symbols WHERE name = ? LIMIT 1",
-                            (route.response_model,),
+                            "SELECT * FROM symbols WHERE name = ? LIMIT 1", (cand,),
                         ).fetchall()
                         if rows:
                             model = _row_to_node(rows[0])
+                            break
                     if model:
                         steps.append({"kind": model.kind.value, "name": model.name,
                                       "file": model.file_path})
@@ -324,6 +334,23 @@ def get_api_flow(route_or_component: str) -> CrossStackFlow:
 # ── Path normalisation helpers ────────────────────────────────────────────────
 
 import re as _re
+
+
+def _extract_model_candidates(type_str: str) -> list[str]:
+    """Return likely model names from a type annotation.
+
+    ``"list[UserResponse]"`` → ``["list[UserResponse]", "UserResponse"]``
+    ``"Optional[User]"``     → ``["Optional[User]", "User"]``
+    ``"Union[A, B]"``        → ``["Union[A, B]", "A", "B"]``
+    """
+    out = [type_str]
+    inner = _re.findall(r"\[([^\[\]]+)\]", type_str)
+    for group in inner:
+        for part in group.split(","):
+            name = part.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
 
 # Patterns that indicate a path segment is a concrete value (not a template)
 _ID_PATTERNS = [

@@ -6,6 +6,8 @@ loop, compiled with a checkpointer for persistence.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from functools import lru_cache
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -21,13 +23,46 @@ from cce.agents.nodes import (
 from cce.agents.state import AgentState
 from cce.config import get_settings
 
+# Dedicated background event loop used to construct an aiosqlite.Connection
+# synchronously. The connection itself is loop-agnostic once created, so the
+# AsyncSqliteSaver built on top of it can be driven from any event loop
+# (FastAPI request loop, pytest-asyncio loop, …).
+_bg_loop: asyncio.AbstractEventLoop | None = None
+_bg_thread: threading.Thread | None = None
+
+
+def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
+    global _bg_loop, _bg_thread
+    if _bg_loop is None:
+        _bg_loop = asyncio.new_event_loop()
+        _bg_thread = threading.Thread(
+            target=_bg_loop.run_forever, name="cce-aiosqlite-loop", daemon=True,
+        )
+        _bg_thread.start()
+    return _bg_loop
+
 
 def _build_checkpointer():
     settings = get_settings()
     if settings.agent.checkpointer == "sqlite":
-        from langgraph.checkpoint.sqlite import SqliteSaver
+        try:
+            import aiosqlite  # noqa: PLC0415
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+        except ImportError:
+            # aiosqlite not installed → fall back to MemorySaver so the graph
+            # still works in async contexts (HTTP server, pytest-asyncio).
+            return MemorySaver()
 
-        return SqliteSaver.from_conn_string(str(settings.paths.agent_checkpoint))
+        loop = _ensure_bg_loop()
+
+        async def _build() -> "AsyncSqliteSaver":
+            # AsyncSqliteSaver.__init__ calls asyncio.get_running_loop(), so we
+            # have to construct both conn AND saver on the bg loop.
+            conn = await aiosqlite.connect(str(settings.paths.agent_checkpoint))
+            return AsyncSqliteSaver(conn)
+
+        fut = asyncio.run_coroutine_threadsafe(_build(), loop)
+        return fut.result(timeout=10)
     return MemorySaver()
 
 

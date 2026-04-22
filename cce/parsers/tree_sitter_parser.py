@@ -104,7 +104,7 @@ def _parse_python(parsed: ParsedFile, src: bytes, root: Path) -> None:
                         if base.type == "identifier":
                             parsed.raw_edges.append(RawEdge(
                                 src_id=_node_id_from_qname(qname),
-                                dst_qualified_name=_text(base, src),
+                                dst_qualified_name=f"{module_qname}.{_text(base, src)}",
                                 kind=EdgeKind.INHERITS,
                                 file_path=parsed.rel_path,
                                 line=node.start_point[0] + 1,
@@ -273,7 +273,7 @@ def _parse_js_ts(parsed: ParsedFile, src: bytes, root: Path) -> None:
                             ))
 
         # import { Foo } from './bar'
-        elif t == "import_declaration":
+        elif t == "import_statement":
             src_id = _node_id_from_qname(module_qname)
             src_n = _child_by_field(node, "source")
             if src_n:

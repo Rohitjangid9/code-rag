@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,19 @@ class LexicalStore:
 
     def search(self, query: str, k: int = 20) -> list[LexHit]:
         """BM25-ranked full-text search. Returns top-*k* hits."""
+        # Sanitize for FTS5: drop characters that confuse the query parser
+        # while keeping word chars and * for prefix matching.
+        # For multi-token queries we join with OR so any matching file is
+        # returned; single-token queries stay as-is ( FTS5 will tokenise
+        # on underscores / dots etc. via unicode61).
+        tokens = re.findall(r"[\w*]+", query)
+        tokens = [t for t in tokens if len(t) > 1 or "*" in t]
+        if not tokens:
+            return []
+        if len(tokens) > 1:
+            safe = " OR ".join(tokens)
+        else:
+            safe = tokens[0]
         conn = self._db.conn
         rows = conn.execute(
             """
@@ -54,7 +68,7 @@ class LexicalStore:
             ORDER BY rank
             LIMIT ?
             """,
-            (query, k),
+            (safe, k),
         ).fetchall()
         return [LexHit(path=r["path"], snippet=r["snippet"], rank=r["rank"]) for r in rows]
 

@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+# Windows consoles default to cp1252, which chokes on rich glyphs like ✓ / ⚠.
+# Switch stdout/stderr to UTF-8 before any rich import writes to them.
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
 
 import typer
 from rich.console import Console
@@ -107,21 +118,57 @@ def symbols(
     path: Path = typer.Argument(..., exists=True),
     kind: str = typer.Option("", help="Filter by kind (Class, Function, Method, Component …)"),
 ) -> None:
-    """List all symbols in a file or directory."""
+    """List all symbols in a file or directory.
+
+    Paths stored in the index are relative to the root passed to ``cce index``,
+    so this command matches on any suffix of the stored ``file_path``.
+    """
     from cce.indexer import IndexPipeline  # noqa: PLC0415
 
     sym_store = IndexPipeline().symbol_store
-    rel = str(path)
-    nodes = sym_store.get_for_file(rel)
+    conn = sym_store._db.conn
+
+    # Build a list of candidate rel-path strings to match against file_path suffix.
+    p = path.resolve()
+    if p.is_file():
+        # Try the bare name, the full OS-style path, and the posix-style path.
+        candidates = {p.name, str(path), p.as_posix(), str(path).replace("\\", "/")}
+        where = " OR ".join(["file_path = ?"] * len(candidates) + ["file_path LIKE ?"] * len(candidates))
+        params = list(candidates) + [f"%/{c}" for c in candidates]
+    else:
+        # Directory: match any file whose path starts with or ends under this dir.
+        dir_str = str(path).replace("\\", "/").rstrip("/")
+        where = "file_path LIKE ? OR file_path LIKE ?"
+        params = [f"{dir_str}/%", f"%/{Path(dir_str).name}/%"]
+
+    rows = conn.execute(
+        f"SELECT * FROM symbols WHERE {where} ORDER BY file_path, line_start",
+        params,
+    ).fetchall()
+
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+    nodes = [_row_to_node(r) for r in rows]
     if kind:
         nodes = [n for n in nodes if n.kind.value.lower() == kind.lower()]
-    tbl = Table(title=f"Symbols in {rel}", show_lines=False)
-    tbl.add_column("Kind", style="cyan", width=12)
-    tbl.add_column("Name", style="bold")
+    if not nodes and p.is_dir():
+        # Fallback: list every indexed symbol (user asked about a repo dir that
+        # was indexed with a different relative root).
+        rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, line_start").fetchall()
+        nodes = [_row_to_node(r) for r in rows]
+        if kind:
+            nodes = [n for n in nodes if n.kind.value.lower() == kind.lower()]
+
+    tbl = Table(title=f"Symbols in {path}  ({len(nodes)} total)", show_lines=False)
+    tbl.add_column("Kind", style="cyan", width=14)
+    tbl.add_column("Qname", style="bold")
+    tbl.add_column("File")
     tbl.add_column("Line", justify="right")
     tbl.add_column("Signature")
     for n in nodes:
-        tbl.add_row(n.kind.value, n.name, str(n.line_start), (n.signature or "")[:60])
+        tbl.add_row(
+            n.kind.value, n.qualified_name, n.file_path,
+            str(n.line_start), (n.signature or "")[:60],
+        )
     console.print(tbl)
 
 
@@ -303,13 +350,26 @@ def doctor() -> None:
     def _fail(name: str, detail: str = "") -> None:
         tbl.add_row(name, "[red]✗ FAIL[/]", detail)
 
-    # tree-sitter
-    for lang in ("python", "typescript", "tsx"):
+    # tree-sitter core + individual language bindings (tree-sitter >= 0.23 API)
+    try:
+        from tree_sitter import Language, Parser  # noqa: PLC0415
+        _ok("tree-sitter core", f"{Language.__module__}")
+    except Exception as e:
+        _fail("tree-sitter core", str(e)[:80])
+
+    _LANG_CHECKS = [
+        ("tree-sitter python", "tree_sitter_python", "language"),
+        ("tree-sitter javascript", "tree_sitter_javascript", "language"),
+        ("tree-sitter typescript", "tree_sitter_typescript", "language_typescript"),
+        ("tree-sitter tsx", "tree_sitter_typescript", "language_tsx"),
+    ]
+    for label, mod_name, attr in _LANG_CHECKS:
         try:
-            from tree_sitter_languages import get_parser as _gp  # noqa: PLC0415
-            _gp(lang); _ok(f"tree-sitter {lang}")
+            mod = __import__(mod_name, fromlist=[attr])
+            getattr(mod, attr)
+            _ok(label)
         except Exception as e:
-            _fail(f"tree-sitter {lang}", str(e)[:80])
+            _fail(label, str(e)[:80])
 
     # SQLite
     try:
@@ -370,12 +430,38 @@ def doctor() -> None:
     except ImportError:
         _warn("GPU check", "torch not installed")
 
-    # API keys
+    # API keys — read from .env via pydantic-settings so the key doesn't
+    # need to be exported as a real OS env var.
+    try:
+        from cce.config import get_settings as _gs_keys  # noqa: PLC0415
+        _env = _gs_keys().model_config.get("env_file", ".env")  # not useful here
+    except Exception:
+        pass  # fall back to os.getenv below
+
+    def _env_val(var: str) -> str | None:
+        # 1) real OS env  2) pydantic-settings .env  3) None
+        if os.getenv(var):
+            return os.getenv(var)
+        try:
+            from pydantic_settings import BaseSettings  # noqa: PLC0415
+            from pydantic_settings.sources import EnvSettingsSource  # noqa: PLC0415
+            # Re-read .env file directly without caching side-effects
+            from pathlib import Path  # noqa: PLC0415
+            env_file = Path(".env")
+            if env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    if line.strip().startswith(var + "="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+        return None
+
     for var, note in [
         ("OPENAI_API_KEY", "needed for openai embedder + agent"),
         ("ANTHROPIC_API_KEY", "needed if CCE_AGENT__LLM_PROVIDER=anthropic"),
     ]:
-        (_ok if os.getenv(var) else _warn)(var, "set" if os.getenv(var) else note)
+        val = _env_val(var)
+        (_ok if val else _warn)(var, "set" if val else note)
 
     # Python packages
     for pkg, note in [("watchdog","watcher"), ("ulid","IDs"), ("yaml","eval"),

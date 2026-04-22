@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "cce"
 version = "0.1.0"
 description = "Code Context Engine — 4-layer indexer for Django/FastAPI/React with LangGraph agent runtime"
-readme = "README.md"
+readme = "docs/README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Journies" }]
@@ -19,6 +19,13 @@ dependencies = [
     "rich>=13.7",
     "python-ulid>=3.0",
     "pathspec>=0.12",
+
+    # --- embeddings (Jina default — CPU, no API key) ---
+    "sentence-transformers>=3.0",
+    # Jina v2 remote code imports `find_pruneable_heads_and_indices`, removed in
+    # transformers 5.x — pin to the 4.x line.
+    "transformers>=4.45,<5.0",
+    "aiosqlite>=0.20",
 
     # --- http server ---
     "fastapi>=0.115",

@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from cce.agents.nodes import (
+    has_tool_calls,
     planner_node,
     reasoner_node,
     responder_node,
@@ -77,7 +78,11 @@ def get_agent_graph():
     builder.add_node("responder", responder_node)
 
     builder.add_edge(START, "planner")
-    builder.add_edge("planner", "retriever")
+    builder.add_conditional_edges(
+        "planner",
+        has_tool_calls,
+        {"retrieve": "retriever", "respond": "responder"},
+    )
     builder.add_edge("retriever", "reasoner")
     builder.add_conditional_edges(
         "reasoner",

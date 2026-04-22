@@ -111,13 +111,13 @@ cce eval /path/to/repo --queries tests/fixtures/eval_queries.yaml
 Edit `.env` — no code changes needed:
 
 ```bash
-# Default: Jina v2 — CPU, Apache-2.0, ~550 MB download once
-CCE_EMBED__BACKEND=jina
-
-# OpenAI (best quality)
+# Default: OpenAI (best quality)
 CCE_EMBED__BACKEND=openai
 CCE_EMBED__MODEL_NAME=text-embedding-3-large
 OPENAI_API_KEY=sk-...
+
+# Jina v2 — CPU, Apache-2.0, ~550 MB download once
+CCE_EMBED__BACKEND=jina
 
 # Nomic (best offline, needs ~7 GB VRAM)
 CCE_EMBED__BACKEND=nomic

@@ -59,6 +59,22 @@ class VectorStore:
                 vectors_config=VectorParams(size=self._dim, distance=Distance.COSINE),
             )
             log.info("Created Qdrant collection %r (dim=%d)", collection, self._dim)
+            return
+
+        # Collection exists — check vector dimension matches current embedder
+        info = self._client.get_collection(collection)
+        current_size = info.config.params.vectors.size  # type: ignore[union-attr]
+        if current_size != self._dim:
+            log.warning(
+                "Collection %r dim mismatch (%d vs %d) — recreating",
+                collection, current_size, self._dim,
+            )
+            self._client.delete_collection(collection)
+            self._client.create_collection(
+                collection_name=collection,
+                vectors_config=VectorParams(size=self._dim, distance=Distance.COSINE),
+            )
+            log.info("Recreated Qdrant collection %r (dim=%d)", collection, self._dim)
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -107,13 +123,14 @@ class VectorStore:
             ]
             qdrant_filter = Filter(must=conditions)
 
-        return self._client.search(
+        resp = self._client.query_points(
             collection_name=collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=k,
             query_filter=qdrant_filter,
             with_payload=True,
         )
+        return resp.points
 
 
 def _chunk_uuid(chunk_id: str) -> str:

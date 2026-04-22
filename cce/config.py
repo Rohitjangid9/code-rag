@@ -5,14 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class PathsSettings(BaseSettings):
+class PathsSettings(BaseModel):
     """Filesystem locations used by the engine."""
-
-    model_config = SettingsConfigDict(env_prefix="CCE_PATHS__", extra="ignore")
 
     data_dir: Path = Field(default=Path(".cce"), description="Root for all indexes/DBs.")
     sqlite_db: Path = Field(default=Path(".cce/index.sqlite"))
@@ -21,18 +19,16 @@ class PathsSettings(BaseSettings):
     agent_checkpoint: Path = Field(default=Path(".cce/agent.sqlite"))
 
 
-class EmbedderSettings(BaseSettings):
+class EmbedderSettings(BaseModel):
     """Embedding backend configuration.
 
     Switch backends via .env:
-        CCE_EMBED__BACKEND=jina          # default — CPU-friendly, no API key
-        CCE_EMBED__BACKEND=openai        # needs OPENAI_API_KEY
+        CCE_EMBED__BACKEND=openai        # default — best quality, needs OPENAI_API_KEY
+        CCE_EMBED__BACKEND=jina          # CPU-friendly, no API key
         CCE_EMBED__BACKEND=nomic         # needs ~7GB VRAM
     """
 
-    model_config = SettingsConfigDict(env_prefix="CCE_EMBED__", extra="ignore")
-
-    backend: Literal["nomic", "jina", "openai"] = "jina"
+    backend: Literal["nomic", "jina", "openai"] = "openai"
     # Model name — auto-detected dim when left at "" + backend default
     model_name: str = ""          # empty → per-backend sensible default
     dim: int = 0                  # 0 → auto-resolved from MODEL_DIMS lookup
@@ -45,10 +41,8 @@ class EmbedderSettings(BaseSettings):
     max_body_words: int = 1_400
 
 
-class QdrantSettings(BaseSettings):
+class QdrantSettings(BaseModel):
     """Qdrant vector store configuration."""
-
-    model_config = SettingsConfigDict(env_prefix="CCE_QDRANT__", extra="ignore")
 
     mode: Literal["embedded", "remote"] = "embedded"
     url: str | None = None
@@ -56,10 +50,8 @@ class QdrantSettings(BaseSettings):
     collection_prefix: str = "cce_"
 
 
-class AgentSettings(BaseSettings):
+class AgentSettings(BaseModel):
     """LangGraph agent runtime configuration."""
-
-    model_config = SettingsConfigDict(env_prefix="CCE_AGENT__", extra="ignore")
 
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     llm_model: str = "gpt-4o-mini"
@@ -67,12 +59,12 @@ class AgentSettings(BaseSettings):
     max_retrieval_loops: int = 3
     checkpointer: Literal["memory", "sqlite"] = "sqlite"
     stream_events: bool = True
+    debug: bool = False
+    strict_citations: bool = True
 
 
-class ServerSettings(BaseSettings):
+class ServerSettings(BaseModel):
     """HTTP server configuration."""
-
-    model_config = SettingsConfigDict(env_prefix="CCE_SERVER__", extra="ignore")
 
     host: str = "127.0.0.1"
     port: int = 8765

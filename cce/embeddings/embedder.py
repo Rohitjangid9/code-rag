@@ -1,13 +1,13 @@
 """Pluggable embedder backends.
 
-DEFAULT: Jina v2 (CPU-friendly, ~550MB, no API key, Apache-2.0).
+DEFAULT: OpenAI text-embedding-3-large (3072‑dim, requires OPENAI_API_KEY).
 Switch via CCE_EMBED__BACKEND in .env — see .env.example for all options.
 
 Backend   | Model                              | Dim  | Needs
 --------- | ---------------------------------- | ---- | ---------------------
-jina      | jinaai/jina-embeddings-v2-base-code | 768  | sentence-transformers
 openai    | text-embedding-3-large             | 3072 | OPENAI_API_KEY
 openai    | text-embedding-3-small             | 1536 | OPENAI_API_KEY
+jina      | jinaai/jina-embeddings-v2-base-code | 768  | sentence-transformers
 nomic     | nomic-ai/nomic-embed-code          | 3584 | ~7GB VRAM
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from functools import lru_cache
+
 
 # Canonical dim for each well-known model (used for auto-detection)
 MODEL_DIMS: dict[str, int] = {
@@ -117,9 +117,17 @@ class OpenAIEmbedder(Embedder):
         self,
         model_name: str = "text-embedding-3-large",
         dim: int = 3072,
+        api_key: str | None = None,
     ) -> None:
+        import os  # noqa: PLC0415
+
+        # Ensure .env is loaded if OPENAI_API_KEY is missing
+        if api_key is None and not os.getenv("OPENAI_API_KEY"):
+            from dotenv import load_dotenv  # noqa: PLC0415
+            load_dotenv(".env")
+
         from openai import OpenAI  # noqa: PLC0415
-        self._client = OpenAI()
+        self._client = OpenAI(api_key=api_key)
         self._model = model_name
         self.dim = dim
         # Only pass 'dimensions' for v3 models AND when user has customised the dim
@@ -191,9 +199,8 @@ class NomicEmbedder(Embedder):
 
 # ── Factory ────────────────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1)
 def get_embedder() -> Embedder:
-    """Return the configured embedder (singleton). Reads from CCE_EMBED__* env vars."""
+    """Return the configured embedder. Reads fresh from CCE_EMBED__* env vars."""
     from cce.config import get_settings  # noqa: PLC0415
     cfg = get_settings().embedder
     model, dim = _resolve(cfg.backend, cfg.model_name, cfg.dim)

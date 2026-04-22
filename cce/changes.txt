@@ -1,0 +1,79 @@
+P0 — fixes that unblock correctness today
+Tool-call sanity in the planner (cce/agents/nodes.py:90)
+
+After llm.invoke(...), if response.tool_calls is empty but response.content contains to=functions. / <|tool_calls|> / {"tool_uses" → parse it manually into tool calls, or retry with tool_choice="required".
+Log the raw AIMessage (tool_calls, content prefix, model name) on every turn behind a CCE_AGENT__DEBUG flag.
+Reject models that can't emit structured tool_calls — add doctor check for tool-calling compatibility.
+Enumeration tools ( cce/retrieval/tools.py +  cce/agents/tools.py)
+
+list_symbols(file_path: str | None, kind: str | None, limit: int = 200) -> list[Node]
+list_routes(framework: str | None = None) -> list[RouteInfo] → SELECT * FROM symbols WHERE kind IN ('Route','URLPattern')
+list_cli_commands() -> list[Node] (once Typer extractor exists — below)
+list_files(glob: str = "**/*") -> list[str]
+These are SELECT * WHERE … queries — deterministic, cheap, and break the "top-k ranked" trap that made Q7 miss 14 commands.
+grep_code(pattern, path_glob?, limit=50) tool
+
+Ripgrep-backed or SQLite-backed regex over FTS content; returns (path, line, line_text).
+This is what Q2 needed: finding planner_node as an identifier inside graph.py without relying on CALLS edges.
+Strict citation in the responder (cce/agents/nodes.py:207)
+
+Before calling the LLM, build a CITATION_TABLE from retrieved_context with verified {id, qname, file, line_start, line_end}.
+Responder prompt: "Cite only [N] tokens from CITATION_TABLE. Never invent a file or line number."
+Post-process the answer: regex every file:line in the output, cross-check against Hit objects; drop or correct mismatches.
+Force structured output: response_format={"type": "json_schema", ...} with answer: str, citations: list[{symbol, file, line}].
+P1 — pipeline coupling & extractor depth
+Reference edges beyond calls (cce/parsers/python_resolver.py)
+
+Current: only call-expression nodes.
+Add: function/class identifiers used as arguments (add_node("x", fn)), decorator targets (@decorator), assignments (handlers = {"x": fn}). Emit EdgeKind.REFERENCES with confidence<1.0.
+Update find_callers to optionally include REFERENCES edges (flag-gated).
+Typer / Click / argparse extractor → cce/extractors/cli_extractor.py
+
+Detect @app.command(...) / @click.command(...) → emit NodeKind.CLI_COMMAND with name + args + help metadata.
+Gives you Q7 perfectly.
+LangGraph extractor → detect StateGraph().add_node("x", fn) / add_edge("a","b") → emit GRAPH_NODE / GRAPH_EDGE metadata, plus a REFERENCES edge graph_builder → fn.
+
+FastAPI / APIRouter audit
+
+Ensure @router.post("/x") with include_router(router, prefix="/agent") computes the effective path /agent/x. Store both path (local) and effective_path on the Route symbol.
+This fixes Q4's "Route not found".
+Path-key normalization
+
+Store repo_root_abs and file_path (relative). Add a resolve_display_path() that produces the path you want in answers (repo-relative, not index-root-relative).
+P2 — robustness, observability, evals
+Index manifest → .cce/index.json with {root, indexed_at, commit_sha, file_count, layers, db_path, qdrant_path}. On server start, load and log; reject queries if manifest missing.
+
+Staleness guard — cheap mtime hash sweep during HybridRetriever.retrieve; if >X files changed, warn in the result payload.
+
+Per-query trace — every turn writes {thread_id, tool_call, args, result_count, elapsed_ms} to logs/agent_trace.jsonl. Already half-there via reasoning_steps — make it machine-readable.
+
+Answer-level eval — extend  cce/eval/harness.py with:
+
+Ground-truth (query, expected_symbol, expected_file, expected_lines).
+Metrics: exact-symbol hit, exact-file hit, line-range IoU, citation-validity (does every cited file:line exist?).
+CI-runnable so every indexer change is measured.
+Planner prompt with a tool-routing cheat sheet — explicit rules: "list X in file Y → get_file_outline", "all routes → list_routes", "callers → find_callers then fallback to grep_code". This alone would have fixed Q3, Q6, Q7.
+
+Retrieval fusion tuning — widen _format_context_block snippets (400-800 chars), increase max_context_items with token-budget-aware trimming using tiktoken, expose per-tool k so the planner can request "get_file_outline with limit=200".
+
+Decouple planner and responder LLMs in  cce/config.py — so you can pair a strong tool-caller (planner) with an accurate synthesizer (responder).
+
+P3 — nice-to-have
+Unified Symbol.path_repo_relative computed field in graph.schema.Node.
+
+Incremental watcher → vector store sync (exists for sqlite, not for Qdrant semantic layer).
+
+cce answer <query> CLI that runs the exact same pipeline as the HTTP endpoint — deterministic repro of agent runs.
+
+SCIP-compatible reference index — you already have the emitter ( cce/scip/emitter.py). Emit REFERENCES edges into SCIP format so external tools can consume.
+
+Minimum change set to fix the 9 questions in your log
+If you want the fastest win, do these four:
+
+Planner tool-call sanity check (P0-1) — fixes Q2, Q4, Q9 silent failures and the garbled CJK leak.
+list_routes + list_symbols + get_file_outline playbook in prompt (P0-2 + P1-8) — fixes Q3, Q6, Q7.
+Strict citation / no-hallucinated-lines (P0-4) — fixes Q1 line-number fabrication.
+grep_code tool + REFERENCES edges (P0-3 + P1-5) — fixes Q2 callers.
+With just those four, the same 9-question run should score around 80 / 90 instead of 36 / 90.
+
+Want me to implement any of these? I'd start with #1 (tool-call sanity) and #2 (enumeration tools + prompt playbook) since they're the highest leverage and touch the fewest files.

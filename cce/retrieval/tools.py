@@ -47,6 +47,12 @@ class CrossStackFlow(BaseModel):
     steps: list[dict] = Field(default_factory=list)
 
 
+class GrepHit(BaseModel):
+    path: str
+    line: int
+    text: str
+
+
 # ── Store access helper ────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
@@ -84,7 +90,7 @@ def search_code(
     - auto:     hybrid if index exists, else lexical
     """
     if mode == "semantic":
-        return [_hr_to_hit(r) for r in _semantic_search(query, k, filters)]
+        return _semantic_search(query, k, filters)
 
     if mode == "lexical":
         p = _pipeline()
@@ -393,7 +399,7 @@ def _path_templates_match(concrete: str, template: str) -> bool:
 # ── Phase 7: semantic search ────────────────────────────────────────────────────
 
 def _semantic_search(query: str, k: int, filters: dict | None) -> list[Hit]:
-    """Query Qdrant with nomic-embed-code embeddings."""
+    """Query Qdrant with the configured embedder."""
     from cce.config import get_settings  # noqa: PLC0415
     from cce.embeddings.embedder import get_embedder  # noqa: PLC0415
     from cce.index.vector_store import VectorStore  # noqa: PLC0415
@@ -402,23 +408,32 @@ def _semantic_search(query: str, k: int, filters: dict | None) -> list[Hit]:
     embedder = get_embedder()
     vstore = VectorStore(settings)
 
-    # We need to know the root for collection naming; use stored files
-    conn = _pipeline().symbol_store._db.conn
-    sample = conn.execute("SELECT path FROM files LIMIT 1").fetchone()
-    if not sample:
-        return []
-
-    # Derive root from any indexed file — store collection per DB path instead
-    collection = vstore.collection_name_from_db(settings.paths.sqlite_db)
-    if not vstore.collection_exists(collection):
+    # Discover all collections that match our prefix and embedder dimension.
+    prefix = settings.qdrant.collection_prefix
+    target_dim = embedder.dim
+    collections: list[str] = []
+    for c in vstore._client.get_collections().collections:
+        if not c.name.startswith(prefix):
+            continue
+        info = vstore._client.get_collection(c.name)
+        size = info.config.params.vectors.size  # type: ignore[union-attr]
+        if size == target_dim:
+            collections.append(c.name)
+    if not collections:
         return []
 
     query_vec = embedder.embed_query(query)
-    results = vstore.search(collection, query_vec, k=k, filters=filters)
+
+    # Search every matching collection and merge by score.
+    all_results: list[tuple[float, dict]] = []
+    for collection in collections:
+        for r in vstore.search(collection, query_vec, k=k, filters=filters):
+            all_results.append((r.score, r.payload or {}))
+
+    all_results.sort(key=lambda t: t[0], reverse=True)
 
     hits: list[Hit] = []
-    for r in results:
-        payload = r.payload or {}
+    for score, payload in all_results[:k]:
         node_id = payload.get("node_id", "")
         node = _pipeline().graph_store.get_node(node_id) if node_id else None
         hits.append(Hit(
@@ -427,7 +442,156 @@ def _semantic_search(query: str, k: int, filters: dict | None) -> list[Hit]:
             line_start=node.line_start if node else 0,
             line_end=node.line_end if node else 0,
             snippet=payload.get("header", ""),
-            score=r.score,
+            score=score,
             provenance="vec",
         ))
+    return hits
+
+
+
+# ── P0-2: Deterministic enumeration tools ─────────────────────────────────────
+
+def list_symbols(
+    file_path: str | None = None,
+    kind: str | None = None,
+    name_prefix: str | None = None,
+    limit: int = 200,
+) -> list[Node]:
+    """Deterministic ``SELECT`` over the symbols table.
+
+    Unlike ``search_code`` (ranked / top-k BM25), this returns every matching
+    row up to *limit*. Use it when enumeration accuracy matters (e.g., "list
+    every CLI command" / "list every symbol in file X").
+    """
+    conn = _pipeline().symbol_store._db.conn
+    where: list[str] = []
+    params: list = []
+
+    if file_path:
+        # Match exact path or repo-suffix (handles index-root vs repo-root mismatch).
+        where.append("(file_path = ? OR file_path LIKE ?)")
+        params += [file_path, f"%/{file_path}"]
+    if kind:
+        where.append("kind = ?")
+        params.append(kind)
+    if name_prefix:
+        where.append("(name LIKE ? OR qualified_name LIKE ?)")
+        params += [f"{name_prefix}%", f"%.{name_prefix}%"]
+
+    sql = "SELECT * FROM symbols"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY file_path, line_start LIMIT ?"
+    params.append(max(1, min(limit, 2000)))
+
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+    return [_row_to_node(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def list_routes(framework: str | None = None) -> list[RouteInfo]:
+    """Enumerate every HTTP route/URL pattern in the index."""
+    conn = _pipeline().symbol_store._db.conn
+    sql = "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern')"
+    params: list = []
+    if framework:
+        sql += " AND framework_tag = ?"
+        params.append(framework.lower())
+    sql += " ORDER BY file_path, line_start"
+
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+    out: list[RouteInfo] = []
+    for r in conn.execute(sql, params).fetchall():
+        node = _row_to_node(r)
+        meta = node.meta or {}
+        methods = meta.get("methods", [])
+        if isinstance(methods, str):
+            methods = [methods]
+        pattern = meta.get("path") or meta.get("pattern") or node.name
+        out.append(RouteInfo(
+            pattern=pattern,
+            methods=methods,
+            handler_qname=meta.get("handler", meta.get("view_ref", "")),
+            framework=node.framework_tag.value if node.framework_tag else "unknown",
+            request_model=meta.get("request_model"),
+            response_model=meta.get("response_model"),
+        ))
+    return out
+
+
+def list_files(glob: str | None = None, limit: int = 2000) -> list[str]:
+    """Return every indexed file path, optionally filtered by a shell-style glob."""
+    conn = _pipeline().symbol_store._db.conn
+    rows = conn.execute(
+        "SELECT path FROM files ORDER BY path LIMIT ?", (max(1, min(limit, 10000)),)
+    ).fetchall()
+    paths = [r["path"] for r in rows]
+    if not glob:
+        return paths
+    import fnmatch  # noqa: PLC0415
+    return [p for p in paths if fnmatch.fnmatch(p, glob)]
+
+
+def list_cli_commands() -> list[Node]:
+    """Best-effort CLI command enumeration.
+
+    Until the Typer/Click extractor lands (P1), this returns every Function
+    symbol defined in files whose path ends with ``cli.py`` or ``__main__.py``.
+    Works today for Typer-based CLIs (the common case).
+    """
+    conn = _pipeline().symbol_store._db.conn
+    rows = conn.execute(
+        """
+        SELECT * FROM symbols
+        WHERE kind IN ('Function','Method','CliCommand')
+          AND (file_path LIKE '%cli.py' OR file_path LIKE '%__main__.py')
+        ORDER BY file_path, line_start
+        """
+    ).fetchall()
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+    return [_row_to_node(r) for r in rows]
+
+
+# ── P0-3: grep_code (regex over indexed file content) ─────────────────────────
+
+def grep_code(
+    pattern: str,
+    path_glob: str | None = None,
+    limit: int = 50,
+    case_sensitive: bool = True,
+) -> list[GrepHit]:
+    """Regex line-grep over every indexed file.
+
+    Uses the ``lex_fts`` content column (populated by the ``lexical`` layer) so
+    it works against the same snapshot the rest of retrieval uses — no disk IO,
+    no dependency on ripgrep, no risk of hitting uncommitted edits.
+
+    This is the fallback the agent should use when ``find_callers`` returns
+    nothing because the reference isn't a call expression (e.g. callbacks,
+    decorators, ``add_node("x", fn)``).
+    """
+    import fnmatch  # noqa: PLC0415
+    import re as _re_local  # noqa: PLC0415
+
+    try:
+        rx = _re_local.compile(pattern, 0 if case_sensitive else _re_local.IGNORECASE)
+    except _re_local.error as exc:
+        raise ValueError(f"invalid regex {pattern!r}: {exc}") from exc
+
+    conn = _pipeline().symbol_store._db.conn
+    # Pull (path, content) for every file — lex_fts has no path index so we
+    # stream rows and filter path-side rather than pre-filter in SQL.
+    rows = conn.execute("SELECT path, content FROM lex_fts").fetchall()
+
+    hits: list[GrepHit] = []
+    cap = max(1, min(limit, 500))
+    for r in rows:
+        path = r["path"]
+        if path_glob and not fnmatch.fnmatch(path, path_glob):
+            continue
+        content = r["content"] or ""
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            if rx.search(line):
+                hits.append(GrepHit(path=path, line=lineno, text=line[:400]))
+                if len(hits) >= cap:
+                    return hits
     return hits

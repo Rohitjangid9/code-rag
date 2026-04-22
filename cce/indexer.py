@@ -166,7 +166,7 @@ class IndexPipeline:
     # ── Phase 7 — semantic embedding ──────────────────────────────────────────
 
     def _index_semantic(self, root: Path, stats: IndexStats) -> None:
-        """Chunk all symbols, embed with nomic-embed-code, upsert to Qdrant."""
+        """Chunk all symbols, embed with the configured embedder, upsert to Qdrant."""
         try:
             from cce.embeddings.chunker import chunk_nodes  # noqa: PLC0415
             from cce.embeddings.embedder import get_embedder  # noqa: PLC0415

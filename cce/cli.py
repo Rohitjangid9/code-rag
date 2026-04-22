@@ -330,6 +330,33 @@ def eval(
     console.print(report.rich_table())
 
 
+def _check_tool_call_support(provider: str, model: str) -> tuple[bool, str]:
+    """Return (is_compatible, human_detail) for the configured agent LLM.
+
+    Rough allow-list based on published provider docs. Conservative by design
+    — we warn (not fail) when unsure so a user with a fine-tuned model can
+    override. Any model that cannot emit structured tool_calls will trigger
+    the planner's leak-recovery path at runtime (see cce.agents.nodes).
+    """
+    if provider == "openai":
+        ok_markers = ("gpt-4", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-0125", "o1", "o3", "o4")
+        if any(mk in model for mk in ok_markers) or model == "":
+            return True, "OpenAI function-calling supported"
+        return False, f"model {model!r} may not support tools — use gpt-4* / gpt-3.5-turbo-1106+"
+    if provider == "anthropic":
+        if "claude-3" in model or "claude-4" in model or model == "":
+            return True, "Anthropic tool_use supported"
+        return False, f"model {model!r} — use claude-3* or newer"
+    if provider == "ollama":
+        tool_capable = ("llama3.1", "llama3.2", "mistral-nemo", "firefunction",
+                        "command-r", "qwen2.5", "hermes-3")
+        if any(mk in model for mk in tool_capable):
+            return True, "Ollama model listed as tool-capable"
+        return False, (f"model {model!r} may emit tool-call text instead of structured "
+                       "tool_calls — planner will try to recover, but prefer llama3.1 / qwen2.5 / hermes-3")
+    return False, f"unknown provider {provider!r}"
+
+
 @app.command()
 def doctor() -> None:
     """Check all critical dependencies and configuration."""
@@ -385,10 +412,33 @@ def doctor() -> None:
     try:
         from qdrant_client import QdrantClient as _QC  # noqa: PLC0415
         from cce.config import get_settings as _gs  # noqa: PLC0415
-        cfg = _gs(); cfg.paths.qdrant_path.mkdir(parents=True, exist_ok=True)
-        _QC(path=str(cfg.paths.qdrant_path)); _ok("Qdrant (embedded)", str(cfg.paths.qdrant_path))
+        cfg = _gs()
+        if cfg.qdrant.mode == "embedded":
+            cfg.paths.qdrant_path.mkdir(parents=True, exist_ok=True)
+            _QC(path=str(cfg.paths.qdrant_path))
+            _ok("Qdrant (embedded)", str(cfg.paths.qdrant_path))
+        else:
+            client = _QC(url=cfg.qdrant.url, api_key=cfg.qdrant.api_key)
+            client.get_collections()
+            _ok("Qdrant (remote)", cfg.qdrant.url or "")
     except Exception as e:
         _fail("Qdrant", str(e)[:80])
+
+    # Re-read .env file directly without caching side-effects
+    def _env_val(var: str) -> str | None:
+        # 1) real OS env  2) pydantic-settings .env  3) None
+        if os.getenv(var):
+            return os.getenv(var)
+        try:
+            from pathlib import Path  # noqa: PLC0415
+            env_file = Path(".env")
+            if env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    if line.strip().startswith(var + "="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+        return None
 
     # Embedder backend
     try:
@@ -399,7 +449,7 @@ def doctor() -> None:
             importlib.import_module("sentence_transformers")
             _ok(f"Embedder ({cfg.backend})", f"{model}  dim={dim}  CPU-ready")
         elif cfg.backend == "openai":
-            if os.getenv("OPENAI_API_KEY"):
+            if _env_val("OPENAI_API_KEY"):
                 _ok(f"Embedder ({cfg.backend})", f"{model}  dim={dim}")
             else:
                 _warn(f"Embedder ({cfg.backend})", "OPENAI_API_KEY not set")
@@ -430,38 +480,26 @@ def doctor() -> None:
     except ImportError:
         _warn("GPU check", "torch not installed")
 
-    # API keys — read from .env via pydantic-settings so the key doesn't
-    # need to be exported as a real OS env var.
-    try:
-        from cce.config import get_settings as _gs_keys  # noqa: PLC0415
-        _env = _gs_keys().model_config.get("env_file", ".env")  # not useful here
-    except Exception:
-        pass  # fall back to os.getenv below
-
-    def _env_val(var: str) -> str | None:
-        # 1) real OS env  2) pydantic-settings .env  3) None
-        if os.getenv(var):
-            return os.getenv(var)
-        try:
-            from pydantic_settings import BaseSettings  # noqa: PLC0415
-            from pydantic_settings.sources import EnvSettingsSource  # noqa: PLC0415
-            # Re-read .env file directly without caching side-effects
-            from pathlib import Path  # noqa: PLC0415
-            env_file = Path(".env")
-            if env_file.exists():
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    if line.strip().startswith(var + "="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
-        except Exception:
-            pass
-        return None
-
+    # API keys — also read from .env directly if not exported as real OS env var.
     for var, note in [
         ("OPENAI_API_KEY", "needed for openai embedder + agent"),
         ("ANTHROPIC_API_KEY", "needed if CCE_AGENT__LLM_PROVIDER=anthropic"),
     ]:
         val = _env_val(var)
         (_ok if val else _warn)(var, "set" if val else note)
+
+    # Agent LLM tool-calling compatibility (P0-1 companion check).
+    try:
+        from cce.config import get_settings as _gs  # noqa: PLC0415
+        ag = _gs().agent
+        provider, model = ag.llm_provider, (ag.llm_model or "").lower()
+        compatible, detail = _check_tool_call_support(provider, model)
+        (_ok if compatible else _warn)(
+            "Agent tool-calling",
+            f"{provider}/{ag.llm_model or '(default)'} — {detail}",
+        )
+    except Exception as e:  # noqa: BLE001
+        _warn("Agent tool-calling", str(e)[:80])
 
     # Python packages
     for pkg, note in [("watchdog","watcher"), ("ulid","IDs"), ("yaml","eval"),
@@ -536,6 +574,67 @@ def info() -> None:
     """Print resolved configuration."""
     settings = get_settings()
     console.print_json(settings.model_dump_json(indent=2))
+
+
+@app.command("inspect-qdrant")
+def inspect_qdrant(
+    collection: str | None = typer.Option(None, help="Collection name (lists all if omitted)."),
+    limit: int = typer.Option(5, help="Number of sample points to show per collection."),
+) -> None:
+    """Inspect Qdrant collections, counts, vector dims, and sample payloads."""
+    from qdrant_client import QdrantClient  # noqa: PLC0415
+    from cce.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    cfg = settings.qdrant
+
+    if cfg.mode == "embedded":
+        client = QdrantClient(path=str(settings.paths.qdrant_path))
+    else:
+        client = QdrantClient(url=cfg.url, api_key=cfg.api_key)
+
+    try:
+        collections = client.get_collections().collections
+    except Exception as exc:
+        console.print(f"[red]Could not connect to Qdrant:[/] {exc}")
+        raise typer.Exit(1)
+
+    if not collections:
+        console.print("[yellow]No collections found in Qdrant.[/]")
+        raise typer.Exit(0)
+
+    # Summary table
+    tbl = Table(title="Qdrant Collections", show_lines=False)
+    tbl.add_column("Collection", style="cyan")
+    tbl.add_column("Vector Size", justify="right")
+    tbl.add_column("Points", justify="right")
+    for c in collections:
+        info = client.get_collection(c.name)
+        count = client.count(c.name).count
+        vec_cfg = info.config.params.vectors
+        size = getattr(vec_cfg, "size", "N/A") if not isinstance(vec_cfg, dict) else "multi"
+        tbl.add_row(c.name, str(size), str(count))
+    console.print(tbl)
+
+    target = collection or (collections[0].name if len(collections) == 1 else None)
+    if not target:
+        console.print("\n[dim]Use --collection NAME to inspect payloads.[/]")
+        return
+
+    console.print(f"\n[bold]Sample payloads from {target}:[/]")
+    points, _ = client.scroll(target, limit=limit, with_vectors=False, with_payload=True)
+    if not points:
+        console.print("[dim]No points in collection.[/]")
+        return
+
+    for p in points:
+        payload = p.payload or {}
+        pt_tbl = Table(title=f"Point {p.id}", show_lines=False, width=100)
+        pt_tbl.add_column("Field", style="cyan", width=18)
+        pt_tbl.add_column("Value")
+        for k, v in sorted(payload.items()):
+            pt_tbl.add_row(k, str(v)[:200])
+        console.print(pt_tbl)
 
 
 if __name__ == "__main__":

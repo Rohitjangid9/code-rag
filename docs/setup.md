@@ -71,11 +71,16 @@ CCE_PATHS__QDRANT_PATH=.cce/qdrant
 CCE_PATHS__AGENT_CHECKPOINT=.cce/agent.sqlite
 
 # ── Embedder ───────────────────────────
-# Jina v2 — CPU-friendly, Apache-2.0, ~550 MB one-time download
-CCE_EMBED__BACKEND=jina
-CCE_EMBED__MODEL_NAME=jinaai/jina-embeddings-v2-base-code
-CCE_EMBED__DEVICE=cpu
-CCE_EMBED__BATCH_SIZE=32
+# OpenAI — best hosted quality (requires API key)
+CCE_EMBED__BACKEND=openai
+CCE_EMBED__MODEL_NAME=text-embedding-3-large
+# OPENAI_API_KEY=sk-...
+
+# Jina v2 — CPU-friendly, Apache-2.0, ~550 MB one-time download (no API key)
+# CCE_EMBED__BACKEND=jina
+# CCE_EMBED__MODEL_NAME=jinaai/jina-embeddings-v2-base-code
+# CCE_EMBED__DEVICE=cpu
+# CCE_EMBED__BATCH_SIZE=32
 
 # ── Qdrant ─────────────────────────────
 CCE_QDRANT__MODE=embedded

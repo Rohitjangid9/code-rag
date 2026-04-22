@@ -85,7 +85,7 @@ Triggered by `cce index <path>` or `POST /index`. Each file passes through:
    - `cce.embeddings.chunker.chunk_nodes` emits one chunk per
      function / method / class / component with a small **header** block
      (`path | qname | framework | imports | docstring`) prepended to the body.
-   - `cce.embeddings.embedder.get_embedder()` resolves to Jina (CPU default),
+   - `cce.embeddings.embedder.get_embedder()` resolves to OpenAI (default),
      OpenAI (hosted), or Nomic (local GPU), all behind the same interface.
    - Chunks are upserted to a per-repo **Qdrant collection** with payload
      `{node_id, path, qname, kind, framework_tag}` for filtered search.

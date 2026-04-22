@@ -1,7 +1,7 @@
 """Phase 7 — Chunker, embedder interface, vector store, and semantic search tests.
 
-The NomicEmbedder requires GPU + model download, so we mock it throughout.
-Real integration tests are gated behind the 'gpu' pytest mark.
+The default embedder may require an API key or GPU + model download,
+so we mock it throughout. Real integration tests are gated behind the 'gpu' pytest mark.
 """
 
 from __future__ import annotations

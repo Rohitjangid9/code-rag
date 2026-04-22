@@ -1,0 +1,48 @@
+1. Exact symbol lookup (tests symbol store)
+Question: Where is planner_node defined?
+
+Expected: Should return cce.agents.nodes.planner_node in cce/agents/nodes.py:21.
+
+2. Graph / caller edges (tests graph layer)
+Question: Who calls planner_node?
+
+Expected: Should trace edges to get_agent_graph in  cce/agents/graph.py (since it wires the node into the graph).
+
+3. FastAPI framework extraction (tests framework layer)
+Question: What HTTP endpoints does the agent router expose?
+
+Expected: Should find /agent/query (POST) and /agent/stream (POST) from cce/server/routes/agent.py.
+
+4. Cross-stack flow (tests framework + graph together)
+Question: What happens when I POST to /agent/query?
+
+Expected: Should trace: route /agent/query → query handler in agent.py → calls get_agent_graph() → invokes the LangGraph app → final answer with citations.
+
+5. Lexical full-text search (tests lexical store)
+Question: How does the hybrid retriever rank results?
+
+Expected: Should find HybridRetriever in  cce/retrieval/hybrid.py and mention RRF (Reciprocal Rank Fusion), BM25, and graph expansion.
+
+6. Multi-symbol overview (tests planner tool-calling)
+Question: List all the agent nodes and what each one does.
+
+Expected: Should return:
+
+planner_node — decides tools
+retriever_node — executes tools
+reasoner_node — loop bookkeeping
+responder_node — synthesizes answer
+7. Typer CLI commands (tests symbol + lexical)
+Question: What CLI commands does cce expose?
+
+Expected: Should list scan, index, search, symbols,  get, callers, refs, neighborhood,  query, watch, serve, eval, etc. from  cce/cli.py.
+
+8. Conceptual / vague query (tests if LLM planner bridges the gap)
+Question: How is the codebase indexed from start to finish?
+
+Expected: Should describe the pipeline: walk → hash → lexical → parse → framework extract → resolve → graph, referencing IndexPipeline in  cce/indexer.py.
+
+9. Negative / edge case test
+Question: How does authentication work in this codebase?
+
+Expected: Should honestly say no auth-related symbols were found (good test of graceful "not found" handling).

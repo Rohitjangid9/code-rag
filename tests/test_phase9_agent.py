@@ -51,26 +51,36 @@ def test_retriever_handles_no_tool_calls():
 
 def test_should_continue_returns_respond_at_max_loops():
     from cce.agents.nodes import should_continue  # noqa: PLC0415
-    from langchain_core.messages import AIMessage  # noqa: PLC0415
 
-    state = {
-        "loop_count": 10,
-        "messages": [AIMessage(content="done", tool_calls=[{"name": "search_code", "id": "x", "args": {}}])],
-    }
+    state = {"loop_count": 10, "messages": []}
     with patch("cce.agents.nodes.get_settings") as ms:
         ms.return_value.agent.max_retrieval_loops = 3
         assert should_continue(state) == "respond"
 
 
-def test_should_continue_returns_retrieve_with_tool_calls():
+def test_should_continue_returns_plan_under_cap():
     from cce.agents.nodes import should_continue  # noqa: PLC0415
+
+    state = {"loop_count": 1, "messages": []}
+    with patch("cce.agents.nodes.get_settings") as ms:
+        ms.return_value.agent.max_retrieval_loops = 5
+        assert should_continue(state) == "plan"
+
+
+def test_has_tool_calls_returns_retrieve_with_tool_calls():
+    from cce.agents.nodes import has_tool_calls  # noqa: PLC0415
     from langchain_core.messages import AIMessage  # noqa: PLC0415
 
     msg = AIMessage(content="", tool_calls=[{"name": "search_code", "id": "1", "args": {}}])
-    state = {"loop_count": 1, "messages": [msg]}
-    with patch("cce.agents.nodes.get_settings") as ms:
-        ms.return_value.agent.max_retrieval_loops = 5
-        assert should_continue(state) == "retrieve"
+    assert has_tool_calls({"messages": [msg]}) == "retrieve"
+
+
+def test_has_tool_calls_returns_respond_without_tool_calls():
+    from cce.agents.nodes import has_tool_calls  # noqa: PLC0415
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    assert has_tool_calls({"messages": [AIMessage(content="done")]}) == "respond"
+    assert has_tool_calls({"messages": []}) == "respond"
 
 
 def test_responder_node_with_mocked_llm():

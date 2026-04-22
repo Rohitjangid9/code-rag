@@ -28,7 +28,7 @@ absolute paths if you run `cce` from multiple dirs but want one shared index.
 
 | Env var | Default | Values / Notes |
 |---------|---------|----------------|
-| `CCE_EMBED__BACKEND` | `jina` | `jina` (CPU, default), `openai`, `nomic` |
+| `CCE_EMBED__BACKEND` | `openai` | `openai` (default, hosted), `jina` (CPU), `nomic` (GPU) |
 | `CCE_EMBED__MODEL_NAME` | `""` | Empty → per-backend default. Override to pin a model. |
 | `CCE_EMBED__DIM` | `0` | `0` → auto-resolved from the model. Override only if you know what you're doing. |
 | `CCE_EMBED__DEVICE` | `auto` | `auto`, `cuda`, `cpu`, `mps` |
@@ -41,15 +41,15 @@ absolute paths if you run `cce` from multiple dirs but want one shared index.
 ### Backend recipes
 
 ```ini
-# Default — Jina v2 code, Apache-2.0, ~550 MB download once
-CCE_EMBED__BACKEND=jina
-CCE_EMBED__MODEL_NAME=jinaai/jina-embeddings-v2-base-code
-
-# OpenAI (best hosted quality)
+# Default — OpenAI text-embedding-3-large, best hosted quality
 CCE_EMBED__BACKEND=openai
 CCE_EMBED__MODEL_NAME=text-embedding-3-large
 CCE_EMBED__DIM=3072
 OPENAI_API_KEY=sk-...
+
+# Jina v2 code, Apache-2.0, ~550 MB download once, CPU-friendly
+CCE_EMBED__BACKEND=jina
+CCE_EMBED__MODEL_NAME=jinaai/jina-embeddings-v2-base-code
 
 # nomic-embed-code (best offline quality, needs ~7 GB VRAM)
 CCE_EMBED__BACKEND=nomic
@@ -132,7 +132,7 @@ confirm dependencies line up with the configuration.
 from cce.config import get_settings
 
 settings = get_settings()
-settings.embedder.backend       # 'jina'
+settings.embedder.backend       # 'openai'
 settings.paths.sqlite_db        # PosixPath('.cce/index.sqlite')
 settings.agent.llm_model        # 'gpt-4o-mini'
 ```

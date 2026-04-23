@@ -91,8 +91,46 @@ class SymbolStore:
         conn.commit()
 
     def delete_for_file(self, file_path: str) -> None:
+        """Delete all symbols whose file_path matches *file_path*.
+
+        Normalises both stored paths and the query to forward slashes so that
+        old records written with Windows back-slashes are cleaned up correctly
+        when the indexer re-processes them with the new POSIX rel-path format.
+        """
         conn = self._db.conn
-        conn.execute("DELETE FROM symbols WHERE file_path = ?", (file_path,))
+        posix = file_path.replace("\\", "/")
+        win   = file_path.replace("/", "\\")
+        conn.execute(
+            "DELETE FROM symbols WHERE file_path IN (?, ?)",
+            (posix, win),
+        )
+        conn.commit()
+
+    def merge_meta(self, node_id: str, patch: dict) -> None:
+        """Merge *patch* into the existing meta JSON of symbol *node_id*.
+
+        Existing keys are preserved; only absent keys are added.  Used by
+        ``_apply_parsed`` to attach edge-carried metadata (e.g.
+        ``graph_node_name`` from the LangGraph extractor) to the resolved
+        destination symbol without overwriting its other meta fields.
+        """
+        import json as _json  # noqa: PLC0415
+
+        conn = self._db.conn
+        row = conn.execute(
+            "SELECT meta FROM symbols WHERE id = ?", (node_id,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            existing: dict = _json.loads(row["meta"] or "{}")
+        except Exception:  # noqa: BLE001
+            existing = {}
+        merged = {**patch, **existing}   # existing wins (preserves current keys)
+        conn.execute(
+            "UPDATE symbols SET meta = ? WHERE id = ?",
+            (_json.dumps(merged), node_id),
+        )
         conn.commit()
 
     # ------------------------------------------------------------------

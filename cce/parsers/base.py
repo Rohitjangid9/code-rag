@@ -23,6 +23,10 @@ class RawEdge:
     # How this edge was produced — essential for debugging bad graph edges.
     # Values: "tree-sitter" | "jedi" | "ts-morph" | "heuristic" | "name-match" | "import"
     resolver_method: str = ""
+    # Optional metadata to MERGE into the destination symbol when the edge
+    # resolves successfully (e.g. {"graph_node_name": "planner"} from LangGraph).
+    # Does NOT override existing meta keys — uses a JSON merge-patch approach.
+    dst_meta_patch: dict = field(default_factory=dict)
 
 
 @dataclass

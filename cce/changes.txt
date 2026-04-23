@@ -1,79 +1,106 @@
-P0 — fixes that unblock correctness today
-Tool-call sanity in the planner (cce/agents/nodes.py:90)
+Now let me create a scorecard table:
 
-After llm.invoke(...), if response.tool_calls is empty but response.content contains to=functions. / <|tool_calls|> / {"tool_uses" → parse it manually into tool calls, or retry with tool_choice="required".
-Log the raw AIMessage (tool_calls, content prefix, model name) on every turn behind a CCE_AGENT__DEBUG flag.
-Reject models that can't emit structured tool_calls — add doctor check for tool-calling compatibility.
-Enumeration tools ( cce/retrieval/tools.py +  cce/agents/tools.py)
+## Agent Accuracy Summary
 
-list_symbols(file_path: str | None, kind: str | None, limit: int = 200) -> list[Node]
-list_routes(framework: str | None = None) -> list[RouteInfo] → SELECT * FROM symbols WHERE kind IN ('Route','URLPattern')
-list_cli_commands() -> list[Node] (once Typer extractor exists — below)
-list_files(glob: str = "**/*") -> list[str]
-These are SELECT * WHERE … queries — deterministic, cheap, and break the "top-k ranked" trap that made Q7 miss 14 commands.
-grep_code(pattern, path_glob?, limit=50) tool
+### Overall Score: **56% (5/9 good)**
 
-Ripgrep-backed or SQLite-backed regex over FTS content; returns (path, line, line_text).
-This is what Q2 needed: finding planner_node as an identifier inside graph.py without relying on CALLS edges.
-Strict citation in the responder (cce/agents/nodes.py:207)
+| Category | Count | % |
+|---|---|---|
+| ✓ **PASS** (correct answer, high confidence) | 3 | 33% |
+| ⚠ **PARTIAL** (correct direction, incomplete) | 4 | 44% |
+| ✗ **FAIL** (wrong answer or no retrieval) | 2 | 22% |
 
-Before calling the LLM, build a CITATION_TABLE from retrieved_context with verified {id, qname, file, line_start, line_end}.
-Responder prompt: "Cite only [N] tokens from CITATION_TABLE. Never invent a file or line number."
-Post-process the answer: regex every file:line in the output, cross-check against Hit objects; drop or correct mismatches.
-Force structured output: response_format={"type": "json_schema", ...} with answer: str, citations: list[{symbol, file, line}].
-P1 — pipeline coupling & extractor depth
-Reference edges beyond calls (cce/parsers/python_resolver.py)
+---
 
-Current: only call-expression nodes.
-Add: function/class identifiers used as arguments (add_node("x", fn)), decorator targets (@decorator), assignments (handlers = {"x": fn}). Emit EdgeKind.REFERENCES with confidence<1.0.
-Update find_callers to optionally include REFERENCES edges (flag-gated).
-Typer / Click / argparse extractor → cce/extractors/cli_extractor.py
+## Detailed Results
 
-Detect @app.command(...) / @click.command(...) → emit NodeKind.CLI_COMMAND with name + args + help metadata.
-Gives you Q7 perfectly.
-LangGraph extractor → detect StateGraph().add_node("x", fn) / add_edge("a","b") → emit GRAPH_NODE / GRAPH_EDGE metadata, plus a REFERENCES edge graph_builder → fn.
+### ✓ PASS (3/9)
 
-FastAPI / APIRouter audit
+| Q# | Query | Answer | Citations | Issue |
+|---|---|---|---|---|
+| **Q1** | Where is `planner_node` defined? | Correct file + lines 266-323 | 10/10 valid | None — high quality |
+| **Q4** | What happens on `POST /agent/query`? | Correct route handler + behavior | 10/10 valid | Missing request/response field details |
+| **Q7** | List CLI commands | Complete command list with locations | 10/10 valid | Line numbers missing (shows `?` instead of line) |
 
-Ensure @router.post("/x") with include_router(router, prefix="/agent") computes the effective path /agent/x. Store both path (local) and effective_path on the Route symbol.
-This fixes Q4's "Route not found".
-Path-key normalization
+---
 
-Store repo_root_abs and file_path (relative). Add a resolve_display_path() that produces the path you want in answers (repo-relative, not index-root-relative).
-P2 — robustness, observability, evals
-Index manifest → .cce/index.json with {root, indexed_at, commit_sha, file_count, layers, db_path, qdrant_path}. On server start, load and log; reject queries if manifest missing.
+### ⚠ PARTIAL (4/9)
 
-Staleness guard — cheap mtime hash sweep during HybridRetriever.retrieve; if >X files changed, warn in the result payload.
+| Q# | Query | What worked | What failed | Root cause |
+|---|---|---|---|---|
+| **Q2** | Who calls `planner_node`? | Found callers | No line numbers (shows `?`) | `find_callers` returned file-level refs only; need line-level edges |
+| **Q5** | How does hybrid retriever rank? | Found correct file | No ranking formula in context | Lexical FTS returned the file but not the method body |
+| **Q6** | Agent nodes + what they do? | Listed 4 nodes correctly | No implementations | Retrieved only node names; bodies missing from context window |
+| **Q9** | How does auth work? | Found auth middleware + buckets | No end-to-end flow | Got pieces but not the full request→auth→rate-limit chain |
 
-Per-query trace — every turn writes {thread_id, tool_call, args, result_count, elapsed_ms} to logs/agent_trace.jsonl. Already half-there via reasoning_steps — make it machine-readable.
+---
 
-Answer-level eval — extend  cce/eval/harness.py with:
+### ✗ FAIL (2/9)
 
-Ground-truth (query, expected_symbol, expected_file, expected_lines).
-Metrics: exact-symbol hit, exact-file hit, line-range IoU, citation-validity (does every cited file:line exist?).
-CI-runnable so every indexer change is measured.
-Planner prompt with a tool-routing cheat sheet — explicit rules: "list X in file Y → get_file_outline", "all routes → list_routes", "callers → find_callers then fallback to grep_code". This alone would have fixed Q3, Q6, Q7.
+| Q# | Query | What happened | Root cause |
+|---|---|---|---|
+| **Q3** | What HTTP endpoints? | **0 citations** — gave up | `list_routes()` returned 0 results; routes not indexed in the graph |
+| **Q8** | Index process start-to-finish? | Described agent, not indexing | `search_code` returned agent graph code instead of indexer code; `IndexPipeline` not searchable or not indexed |
 
-Retrieval fusion tuning — widen _format_context_block snippets (400-800 chars), increase max_context_items with token-budget-aware trimming using tiktoken, expose per-tool k so the planner can request "get_file_outline with limit=200".
+---
 
-Decouple planner and responder LLMs in  cce/config.py — so you can pair a strong tool-caller (planner) with an accurate synthesizer (responder).
+## Root Causes & Gaps
 
-P3 — nice-to-have
-Unified Symbol.path_repo_relative computed field in graph.schema.Node.
+### 1. **Routes not indexed (Q3 FAIL)**
+- Command: `list_routes()` returned 0 results
+- Expected: 18+ FastAPI routes in `cce/server/routes/agent.py` + `cce/server/routes/index.py`
+- Why: Routes likely in Python, but framework extractor may have missed them or routes aren't decorated with `@app.get/@router.post`
+- **Action:** Check if FastAPI routes use non-standard decorators or if they're inside a factory function
 
-Incremental watcher → vector store sync (exists for sqlite, not for Qdrant semantic layer).
+### 2. **Symbol bodies not in retrieval (Q5, Q6 PARTIAL)**
+- `get_file_slice()` works but doesn't auto-populate context
+- Planner retrieves 20–21 items but hits "has_symbol_body" coverage gap repeatedly
+- **Action:** Planner needs to explicitly call `get_file_slice()` when "body" is missing instead of just returning what it has
 
-cce answer <query> CLI that runs the exact same pipeline as the HTTP endpoint — deterministic repro of agent runs.
+### 3. **Line numbers lost (Q2, Q7 PARTIAL)**
+- `find_callers()` returns file-level `RawEdge` with `line=0` instead of actual line
+- Node locations printed as `cce/cli.py:?` instead of `cce/cli.py:79`
+- **Action:** Check if `line_start` is being written to the graph correctly for all symbol types
 
-SCIP-compatible reference index — you already have the emitter ( cce/scip/emitter.py). Emit REFERENCES edges into SCIP format so external tools can consume.
+### 4. **Indexing pipeline not searchable (Q8 FAIL)**
+- Agent could not find `IndexPipeline` or `run()` method details
+- But `_build_repo_context()` in `llm.py` references `.cce/index.json` 
+- **Action:** `search_code("IndexPipeline")` should return `cce/indexer.py`, but it returned agent code instead — vector search may have been off-topic or `grep_code` not used
 
-Minimum change set to fix the 9 questions in your log
-If you want the fastest win, do these four:
+---
 
-Planner tool-call sanity check (P0-1) — fixes Q2, Q4, Q9 silent failures and the garbled CJK leak.
-list_routes + list_symbols + get_file_outline playbook in prompt (P0-2 + P1-8) — fixes Q3, Q6, Q7.
-Strict citation / no-hallucinated-lines (P0-4) — fixes Q1 line-number fabrication.
-grep_code tool + REFERENCES edges (P0-3 + P1-5) — fixes Q2 callers.
-With just those four, the same 9-question run should score around 80 / 90 instead of 36 / 90.
+## Recommendations (Priority Order)
 
-Want me to implement any of these? I'd start with #1 (tool-call sanity) and #2 (enumeration tools + prompt playbook) since they're the highest leverage and touch the fewest files.
+| Priority | Issue | Fix | Impact |
+|---|---|---|---|
+| 🔴 **P0** | Q3 FAIL: Routes @ 0 | Reindex with `--layers framework` and verify FastAPI routes are extracted | 11% accuracy → 22% |
+| 🔴 **P0** | Q8 FAIL: IndexPipeline invisible | Add `IndexPipeline.run()` to symbol table (check if it's a method-of-class) | 11% accuracy → 22% |
+| 🟠 **P1** | Q2, Q7: Line numbers `?` | Verify `line_start` written to DB for all symbol types; test `find_callers(line=...)` | 22% accuracy → 33% |
+| 🟠 **P1** | Q5, Q6: Bodies missing | Planner should call `get_file_slice()` when body is needed; increase k for symbol retrieval | 44% accuracy → 56% |
+
+---
+
+## Before/After Index Stats
+
+**This run:**
+- 953 symbols indexed (vs. expected ~1200+ for this repo)
+- 39 edges indexed (vs. expected 500+)
+- 4 CALLS_API edges created by linker ✓
+
+**Likely issues:**
+- Routes extracted: 0 (should be ~18)
+- Framework extraction may have been incomplete or skipped certain patterns
+
+---
+
+## What's working well ✓
+1. **Citation accuracy** — all 10 citations per query are valid (no hallucination)
+2. **Python symbol resolution** — Python CALLS/IMPORTS/REFERENCES working
+3. **File-level retrieval** — can find the right file, just missing line numbers
+4. **LLM tool-calling** — planner correctly identifies when to retry and which tools to use
+
+## What needs work ⚠️
+1. Routes not indexed → Q3 fail
+2. Bodies not in context window → partial answers on implementation questions
+3. Line numbers lost → citations at file level instead of exact locations
+4. IndexPipeline not retrievable → can't answer indexing questions

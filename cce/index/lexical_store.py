@@ -38,7 +38,10 @@ class LexicalStore:
     def upsert(self, rel_path: str, content: str) -> None:
         """Insert or replace the full-text content for *rel_path*."""
         conn = self._db.conn
-        conn.execute("DELETE FROM lex_fts WHERE path = ?", (rel_path,))
+        # F-WIN: delete both slash variants so stale back-slash records
+        # are removed when the indexer switches to POSIX rel-paths.
+        win = rel_path.replace("/", "\\")
+        conn.execute("DELETE FROM lex_fts WHERE path IN (?, ?)", (rel_path, win))
         conn.execute("INSERT INTO lex_fts(path, content) VALUES (?, ?)", (rel_path, content))
         conn.commit()
 
@@ -83,8 +86,9 @@ class LexicalStore:
 
     def delete(self, rel_path: str) -> None:
         conn = self._db.conn
-        conn.execute("DELETE FROM lex_fts WHERE path = ?", (rel_path,))
-        conn.execute("DELETE FROM lex_sym_fts WHERE path = ?", (rel_path,))
+        win = rel_path.replace("/", "\\")
+        conn.execute("DELETE FROM lex_fts WHERE path IN (?, ?)", (rel_path, win))
+        conn.execute("DELETE FROM lex_sym_fts WHERE path IN (?, ?)", (rel_path, win))
         conn.commit()
 
     def search_symbols(self, query: str, k: int = 20) -> list[LexHit]:

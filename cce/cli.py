@@ -436,10 +436,13 @@ def _check_tool_call_support(provider: str, model: str) -> tuple[bool, str]:
     the planner's leak-recovery path at runtime (see cce.agents.nodes).
     """
     if provider == "openai":
-        ok_markers = ("gpt-4", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-0125", "o1", "o3", "o4")
+        ok_markers = (
+            "gpt-4", "gpt-5", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-0125",
+            "o1", "o3", "o4",
+        )
         if any(mk in model for mk in ok_markers) or model == "":
             return True, "OpenAI function-calling supported"
-        return False, f"model {model!r} may not support tools — use gpt-4* / gpt-3.5-turbo-1106+"
+        return False, f"model {model!r} may not support tools — use gpt-4* / gpt-5* / gpt-3.5-turbo-1106+"
     if provider == "anthropic":
         if "claude-3" in model or "claude-4" in model or model == "":
             return True, "Anthropic tool_use supported"

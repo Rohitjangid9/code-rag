@@ -44,11 +44,11 @@ class FastAPIExtractor:
         data = ExtractedData()
         src = source.encode("utf-8", errors="replace")
         tree = _get_parser(_PY).parse(src)
-        module_qname = file_to_module_qname(
-            path,
-            path.parents[len(path.parts) - len(rel_path.split("/")) - 1]
-            if "/" in rel_path else path.parent,
-        )
+        # F-WIN: normalise path separator; use correct formula (R-1 levels up).
+        _rel = rel_path.replace("\\", "/")
+        _parts = _rel.split("/")
+        _root = path.parents[len(_parts) - 1] if len(_parts) > 1 else path.parent
+        module_qname = file_to_module_qname(path, _root)
 
         # Collect router variable names (e.g. app = FastAPI(), users_router = APIRouter())
         router_vars = self._collect_router_vars(tree.root_node, src)

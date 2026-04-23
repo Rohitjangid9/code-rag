@@ -620,19 +620,22 @@ def should_continue(state: AgentState) -> str:
     """After retriever+reasoner: loop back to planner unless loop cap is reached.
 
     F15: forces another loop when coverage axes are incomplete (no subject symbol,
-    no body, no callers) and retries remain.  Always continues when there were
-    tool errors so the planner can recover.
+    no body, no callers) and retries remain.  Always continues when there were tool errors so the planner
+    can recover.  Exits early once ALL axes are satisfied so we don't burn the
+    remaining loop budget on redundant retrieval.
     """
     settings = get_settings()
     loop_count = state.get("loop_count", 0)
     max_loops = settings.agent.max_retrieval_loops
     if loop_count >= max_loops:
         return "respond"
-    # Tool errors — must retry
+    # Tool errors — must retry (unless we already hit max_loops above)
     if state.get("tool_errors", 0) > 0:
         return "plan"
-    # F15: coverage-axis check — loop if any axis is missing
+    # F15: coverage-axis check — loop if any axis is still missing
     axes = state.get("coverage_axes") or {}
     if axes and not all(axes.values()):
         return "plan"
-    return "plan"
+    # All axes satisfied (or no axes tracked yet on first loop) → respond early
+    # rather than running empty retrieval rounds.
+    return "respond"

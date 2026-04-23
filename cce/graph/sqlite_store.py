@@ -10,7 +10,7 @@ from cce.index.db import DatabaseManager
 from cce.index.symbol_store import _row_to_node
 
 
-def _synthesize_module_node(src_id: str, file_path: str) -> Node:
+def _synthesize_module_node(src_id: str, file_path: str, line: int = 0) -> Node:
     """Build a placeholder Module Node for edges whose src is module-scope code."""
     norm = file_path.replace("\\", "/")
     stem = norm.rsplit("/", 1)[-1].rsplit(".", 1)[0]
@@ -29,7 +29,7 @@ def _synthesize_module_node(src_id: str, file_path: str) -> Node:
         qualified_name=qname,
         name=stem,
         file_path=file_path,
-        line_start=0,
+        line_start=line,   # call-site line when available, else 0
         line_end=0,
         language=lang,
     )
@@ -74,12 +74,24 @@ class SQLiteGraphStore:
             conn.commit()
 
     def delete_for_file(self, file_path: str) -> None:
+        """Delete edges CREATED BY *file_path*, normalising path separators.
+
+        Accepts both POSIX (forward-slash) and Windows (back-slash) variants.
+
+        IMPORTANT: only deletes edges where the edge *originated* from this
+        file — i.e. ``file_path`` matches or ``src_id`` is a symbol from this
+        file.  We deliberately do NOT delete edges whose ``dst_id`` is a
+        symbol from this file, because those edges were emitted by OTHER files
+        and must remain valid when a target file is re-indexed.  Removing them
+        would destroy CALLS/REFERENCES edges across file boundaries.
+        """
         conn = self._db.conn
+        posix = file_path.replace("\\", "/")
+        win   = file_path.replace("/", "\\")
         conn.execute(
-            "DELETE FROM edges WHERE file_path = ? OR "
-            "src_id IN (SELECT id FROM symbols WHERE file_path=?) OR "
-            "dst_id IN (SELECT id FROM symbols WHERE file_path=?)",
-            (file_path, file_path, file_path),
+            "DELETE FROM edges WHERE file_path IN (?, ?) OR "
+            "src_id IN (SELECT id FROM symbols WHERE file_path IN (?, ?))",
+            (posix, win, posix, win),
         )
         conn.commit()
 
@@ -138,20 +150,39 @@ class SQLiteGraphStore:
         return SubGraph(root_id=node_id, nodes=nodes, edges=edges)
 
     def find_callers(self, node_id: str, include_refs: bool = True) -> list[Node]:
+        """Return caller nodes.
+
+        Each returned Node's ``line_start`` is overridden with the *edge* line
+        (the actual call / reference site) rather than the caller function's
+        start line.  This gives agents precise ``file:line`` citations instead
+        of just the enclosing function's first line.  ``line_end`` is left as
+        the symbol's real end so callers can still determine the full range.
+        """
         kinds = [EdgeKind.CALLS.value, EdgeKind.REFERENCES.value] if include_refs else [EdgeKind.CALLS.value]
         placeholders = ",".join("?" * len(kinds))
         rows = self._db.conn.execute(
-            f"SELECT e.src_id AS _edge_src_id, e.file_path AS _edge_file_path, s.* "
+            f"SELECT e.src_id AS _edge_src_id, e.file_path AS _edge_file_path, "
+            f"e.line AS _edge_line, s.* "
             f"FROM edges e LEFT JOIN symbols s ON s.id = e.src_id "
             f"WHERE e.dst_id = ? AND e.kind IN ({placeholders})",
             (node_id, *kinds),
         ).fetchall()
         out: list[Node] = []
         for r in rows:
+            edge_line: int = r["_edge_line"] or 0
             if r["id"] is not None:
-                out.append(_row_to_node(r))
+                node = _row_to_node(r)
+                # Override line_start with the precise call-site line when
+                # the edge carries valid line info (line > 0).
+                if edge_line > 0:
+                    node = node.model_copy(update={"line_start": edge_line})
+                out.append(node)
             else:
-                out.append(_synthesize_module_node(r["_edge_src_id"], r["_edge_file_path"] or ""))
+                out.append(_synthesize_module_node(
+                    r["_edge_src_id"],
+                    r["_edge_file_path"] or "",
+                    line=edge_line,
+                ))
         return out
 
     def find_callees(self, node_id: str) -> list[Node]:

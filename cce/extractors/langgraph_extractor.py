@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 
 from cce.extractors.base import ExtractedData
-from cce.graph.schema import EdgeKind, Language, Node, NodeKind
+from cce.graph.schema import EdgeKind, Language
 from cce.parsers.base import RawEdge
 from cce.parsers.tree_sitter_parser import _get_parser, _node_id_from_qname, _text
 from cce.walker import file_to_module_qname
@@ -39,7 +39,10 @@ class LangGraphExtractor:
         data = ExtractedData()
         src = source.encode("utf-8", errors="replace")
         tree = _get_parser(_PY).parse(src)
-        root_path = path.parents[max(0, len(path.parts) - len(rel_path.split("/")) - 1)]
+        # F-WIN: normalise path separator; use correct formula (R-1 levels up).
+        _rel = rel_path.replace("\\", "/")
+        _parts = _rel.split("/")
+        root_path = path.parents[len(_parts) - 1] if len(_parts) > 1 else path.parent
         module_qname = file_to_module_qname(path, root_path)
 
         # Collect builder variable names (e.g. builder = StateGraph(...))
@@ -104,6 +107,14 @@ def _extract_add_node(
                             fn_ref = _text(fn_arg_node, src).strip()
                             line = node.start_point[0] + 1
                             src_qname = f"{module_qname}.__graph__"
+                            # F-LG-FIX: do NOT assume fn_ref is local — it may
+                            # be imported from another module.  Emit the raw
+                            # edge with the best-effort local qname; Jedi will
+                            # also emit a more accurate REFERENCES edge for the
+                            # same call site.  Attach graph_node_name as a
+                            # dst_meta_patch so _apply_parsed() can merge it
+                            # onto the REAL function symbol once the edge is
+                            # resolved — no duplicate/colliding sentinel Node.
                             dst_qname = f"{module_qname}.{fn_ref}" if "." not in fn_ref else fn_ref
                             data.raw_edges.append(RawEdge(
                                 src_id=_node_id_from_qname(src_qname),
@@ -113,19 +124,10 @@ def _extract_add_node(
                                 line=line,
                                 resolver_method="langgraph-extractor",
                                 confidence=0.8,
+                                dst_meta_patch={"graph_node_name": graph_name},
                             ))
-                            # Store graph_node_name in a sentinel node for grep
-                            data.nodes.append(Node(
-                                id=_node_id_from_qname(f"{dst_qname}.__graph_node__"),
-                                kind=NodeKind.FUNCTION,
-                                qualified_name=dst_qname,
-                                name=fn_ref,
-                                file_path=rel_path,
-                                line_start=line,
-                                line_end=line,
-                                language=_PY,
-                                meta={"graph_node_name": graph_name},
-                            ))
+                            # No sentinel Node emitted — avoids qname clash with
+                            # the real function symbol from the tree-sitter pass.
 
         for child in node.children:
             visit(child)

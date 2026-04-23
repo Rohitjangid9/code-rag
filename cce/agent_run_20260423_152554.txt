@@ -1,0 +1,293 @@
+# Agent query run @ 20260423_152554
+# Endpoint: http://127.0.0.1:8765/agent/query
+# Source:   cce\examples.txt
+# Queries:  9
+
+==============================================================================
+[1/9]  thread_id=auto-20260423_152554-01  elapsed=12.19s
+------------------------------------------------------------------------------
+Q: Where is planner_node defined?
+
+A:
+`planner_node` is defined in `nodes.planner_node (cce\agents\nodes.py:266-323)`.
+
+Citations (10):
+  - test_phase9_agent.test_planner_falls_back_without_llm  @  tests\test_phase9_agent.py:32
+  - Learn.code-context-extractor.cce.agents.graph.planner_node  @  cce\agents\graph.py:75
+  - nodes._trim_messages  @  cce\agents\nodes.py:45
+  - nodes.planner_node  @  cce\agents\nodes.py:266
+  - llm._build_llm  @  cce\agents\llm.py:80
+  - nodes._dedup_context  @  cce\agents\nodes.py:74
+  - graph._ensure_bg_loop  @  cce\agents\graph.py:35
+  - graph._build_checkpointer  @  cce\agents\graph.py:46
+  - graph._build  @  cce\agents\graph.py:59
+  - test_phase9_agent.test_get_llm_raises_without_provider  @  tests\test_phase9_agent.py:13
+
+Reasoning steps (5):
+  - loop 1: 0 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 2: 13 items retrieved
+  - tools returned 1 error(s) — retrying
+==============================================================================
+[2/9]  thread_id=auto-20260423_152554-02  elapsed=5.64s
+------------------------------------------------------------------------------
+Q: Who calls planner_node?
+
+A:
+`planner_node` is called by `builder.add_node("planner", planner_node)` in `cce/agents/graph.py:?`.
+
+It’s also invoked directly in the test `tests/test_phase9_agent.py:?`.
+
+Citations (3):
+  - cce\agents\nodes.py  @  cce\agents\nodes.py:0
+  - cce\agents\graph.py  @  cce\agents\graph.py:0
+  - tests\test_phase9_agent.py  @  tests\test_phase9_agent.py:0
+
+Reasoning steps (4):
+  - loop 1: 0 items retrieved
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 2: 3 items retrieved
+  - coverage gaps: has_subject_symbol, has_symbol_body
+==============================================================================
+[3/9]  thread_id=auto-20260423_152554-03  elapsed=4.64s
+------------------------------------------------------------------------------
+Q: What HTTP endpoints does the agent router expose?
+
+A:
+I can’t verify any endpoints from the retrieved context, because the citation table is empty and no source lines were provided.
+
+Citations (0):
+  (none)
+
+Reasoning steps (2):
+  - loop 1: 1 items retrieved
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+==============================================================================
+[4/9]  thread_id=auto-20260423_152554-04  elapsed=6.73s
+------------------------------------------------------------------------------
+Q: What happens when I POST to /agent/query?
+
+A:
+`POST /agent/query` is routed to `agent.query` and returns an `AgentResponse` (`agent.route._query.POST (cce\server\routes\agent.py:105-138)`, `agent.query (cce\server\routes\agent.py:105-138)`).
+
+What it does:
+- synchronously invokes the LangGraph app
+- returns the final state
+- serializes concurrent requests for the same `thread_id` (`agent.query (cce\server\routes\agent.py:105-138)`)
+
+I can’t see the request/response field details from the retrieved context.
+
+Citations (10):
+  - agent.route._query.POST  @  cce\server\routes\agent.py:105
+  - run_agent_queries.ask_agent  @  run_agent_queries.py:44
+  - run_agent_queries.main  @  run_agent_queries.py:91
+  - run_agent_queries.extract_queries  @  run_agent_queries.py:31
+  - agent.query  @  cce\server\routes\agent.py:105
+  - run_agent_queries.format_block  @  run_agent_queries.py:56
+  - embedder._CachedEmbedder._cached_query  @  cce\embeddings\embedder.py:222
+  - embedder.Embedder.embed_query  @  cce\embeddings\embedder.py:66
+  - test_phase7_semantic.FakeEmbedder.embed_query  @  tests\test_phase7_semantic.py:117
+  - embedder.JinaEmbedder.embed_query  @  cce\embeddings\embedder.py:101
+
+Reasoning steps (8):
+  - loop 1: 0 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 2: 1 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 3: 21 items retrieved
+  - tools returned 1 error(s) — retrying
+==============================================================================
+[5/9]  thread_id=auto-20260423_152554-05  elapsed=10.05s
+------------------------------------------------------------------------------
+Q: How does the hybrid retriever rank results?
+
+A:
+The hybrid retriever uses hybrid retrieval and returns the top-k results via `hybrid.HybridRetriever.retrieve (cce\retrieval\hybrid.py:161-229)`.
+
+The retrieved context here does not expose the exact ranking formula or scoring details, so I can’t say precisely how it orders results. The tests do show that:
+- result count is capped by `k` (`test_phase8_hybrid.test_retriever_top_k_respected (tests\test_phase8_hybrid.py:115-119)`)
+- returned RRF scores are positive (`test_phase8_hybrid.test_retriever_rrf_score_positive (tests\test_phase8_hybrid.py:122-125)`)
+- lexical provenance is tracked (`test_phase8_hybrid.test_retriever_provenance_lex (tests\test_phase8_hybrid.py:128-131)`)
+
+If you want, I can summarize the behavior inferred from the tests only.
+
+Citations (10):
+  - tools._hybrid_retriever  @  cce\retrieval\tools.py:78
+  - hybrid.HybridRetriever.retrieve  @  cce\retrieval\hybrid.py:161
+  - test_phase8_hybrid._make_retriever  @  tests\test_phase8_hybrid.py:75
+  - test_phase8_hybrid.test_retriever_returns_results  @  tests\test_phase8_hybrid.py:109
+  - test_phase8_hybrid.test_retriever_provenance_lex  @  tests\test_phase8_hybrid.py:128
+  - test_phase8_hybrid.test_retriever_top_k_respected  @  tests\test_phase8_hybrid.py:115
+  - test_phase8_hybrid.test_retriever_rrf_score_positive  @  tests\test_phase8_hybrid.py:122
+  - test_phase8_hybrid.test_retriever_vector_unavailable_graceful  @  tests\test_phase8_hybrid.py:134
+  - Learn.code-context-extractor.cce.cli.query  @  cce\cli.py:288
+  - harness.EvalHarness  @  cce\eval\harness.py:101
+
+Reasoning steps (7):
+  - loop 1: 0 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 2: 20 items retrieved
+  - tools returned 1 error(s) — retrying
+  - loop 3: 20 items retrieved
+  - tools returned 1 error(s) — retrying
+==============================================================================
+[6/9]  thread_id=auto-20260423_152554-06  elapsed=10.12s
+------------------------------------------------------------------------------
+Q: List all the agent nodes and what each one does.
+
+A:
+The agent graph has four nodes:
+
+- `Learn.code-context-extractor.cce.agents.graph.planner_node (cce\agents\graph.py:75-75)` — planner node
+- `Learn.code-context-extractor.cce.agents.graph.retriever_node (cce\agents\graph.py:76-76)` — retriever node
+- `Learn.code-context-extractor.cce.agents.graph.reasoner_node (cce\agents\graph.py:77-77)` — reasoner node
+- `Learn.code-context-extractor.cce.agents.graph.responder_node (cce\agents\graph.py:78-78)` — responder node
+
+I can confirm the node names, but the retrieved context does not include their implementations, so I can’t say what each one does beyond those names.
+
+Citations (10):
+  - test_phase9_agent.test_planner_falls_back_without_llm  @  tests\test_phase9_agent.py:32
+  - agent.AgentQuery  @  cce\server\routes\agent.py:48
+  - Learn.code-context-extractor.cce.agents.graph.planner_node  @  cce\agents\graph.py:75
+  - Learn.code-context-extractor.cce.agents.graph.retriever_node  @  cce\agents\graph.py:76
+  - Learn.code-context-extractor.cce.agents.graph.reasoner_node  @  cce\agents\graph.py:77
+  - Learn.code-context-extractor.cce.agents.graph.responder_node  @  cce\agents\graph.py:78
+  - agent.AgentResponse  @  cce\server\routes\agent.py:56
+  - agent.route._query.POST  @  cce\server\routes\agent.py:105
+  - Learn.code-context-extractor.cce.cli.eval_agent  @  cce\cli.py:372
+  - run_agent_queries.ask_agent  @  run_agent_queries.py:44
+
+Reasoning steps (6):
+  - loop 1: 0 items retrieved
+  - coverage gaps: has_subject_symbol, has_symbol_body, has_callers
+  - loop 2: 21 items retrieved
+  - coverage gaps: has_symbol_body
+  - loop 3: 21 items retrieved
+  - coverage gaps: has_symbol_body
+==============================================================================
+[7/9]  thread_id=auto-20260423_152554-07  elapsed=6.83s
+------------------------------------------------------------------------------
+Q: What CLI commands does cce expose?
+
+A:
+`cce` exposes these CLI commands:
+
+- `scan` (`Learn.code-context-extractor.cce.cli.scan (cce/cli.py:?)`)
+- `index` (`Learn.code-context-extractor.cce.cli.index (cce/cli.py:?)`)
+- `search` (`Learn.code-context-extractor.cce.cli.search (cce/cli.py:?)`)
+- `symbols` (`Learn.code-context-extractor.cce.cli.symbols (cce/cli.py:?)`)
+- `get_symbol` (`Learn.code-context-extractor.cce.cli.get_symbol (cce/cli.py:?)`)
+- `callers` (`Learn.code-context-extractor.cce.cli.callers (cce/cli.py:?)`)
+- `refs` (`Learn.code-context-extractor.cce.cli.refs (cce/cli.py:?)`)
+- `neighborhood` (`Learn.code-context-extractor.cce.cli.neighborhood (cce/cli.py:?)`)
+- `query` (`Learn.code-context-extractor.cce.cli.query (cce/cli.py:?)`)
+- `watch` (`Learn.code-context-extractor.cce.cli.watch (cce/cli.py:?)`)
+- `export_scip` (`Learn.code-context-extractor.cce.cli.export_scip (cce/cli.py:?)`)
+- `eval` (`Learn.code-context-extractor.cce.cli.eval (cce/cli.py:?)`)
+- `eval_agent` (`Learn.code-context-extractor.cce.cli.eval_agent (cce/cli.py:?)`)
+- `doctor` (`Learn.code-context-extractor.cce.cli.doctor (cce/cli.py:?)`)
+- `serve` (`Learn.code-context-extractor.cce.cli.serve (cce/cli.py:?)`)
+- `get_route_cmd` (`Learn.code-context-extractor.cce.cli.get_route_cmd (cce/cli.py:?)`)
+- `get_api_flow_cmd` (`Learn.code-context-extractor.cce.cli.get_api_flow_cmd (cce/cli.py:?)`)
+- `info` (`Learn.code-context-extractor.cce.cli.info (cce/cli.py:?)`)
+- `inspect_qdrant` (`Learn.code-context-extractor.cce.cli.inspect_qdrant (cce/cli.py:?)`)
+- `answer` (`Learn.code-context-extractor.cce.cli.answer (cce/cli.py:?)`)
+
+Citations (10):
+  - Learn.code-context-extractor.cce.cli.scan  @  cce\cli.py:57
+  - Learn.code-context-extractor.cce.cli.index  @  cce\cli.py:79
+  - Learn.code-context-extractor.cce.cli.search  @  cce\cli.py:124
+  - Learn.code-context-extractor.cce.cli.symbols  @  cce\cli.py:155
+  - Learn.code-context-extractor.cce.cli.get_symbol  @  cce\cli.py:214
+  - Learn.code-context-extractor.cce.cli.callers  @  cce\cli.py:228
+  - Learn.code-context-extractor.cce.cli.refs  @  cce\cli.py:245
+  - Learn.code-context-extractor.cce.cli.neighborhood  @  cce\cli.py:264
+  - Learn.code-context-extractor.cce.cli.query  @  cce\cli.py:288
+  - Learn.code-context-extractor.cce.cli.watch  @  cce\cli.py:312
+
+Reasoning steps (2):
+  - loop 1: 20 items retrieved
+  - coverage gaps: has_subject_symbol, has_symbol_body
+==============================================================================
+[8/9]  thread_id=auto-20260423_152554-08  elapsed=10.81s
+------------------------------------------------------------------------------
+Q: How is the codebase indexed from start to finish?
+
+A:
+From the retrieved context, the indexing-related code only shows how the system *consumes* an index manifest, not how the index is built.
+
+What we can say:
+- The repo summary is loaded from `.cce/index.json` by `llm._build_repo_context (cce\agents\llm.py:150-183)`.
+- It reads `root`, `frameworks`, `languages`, `file_count`, and `symbol_count`, and formats them into a prompt block.
+- If the manifest is missing or unreadable, it returns `""` so the app still works.
+
+The rest of the agent flow is assembled in `graph.get_agent_graph (cce\agents\graph.py:71-94)`, with the planner/retriever/reasoner/responder nodes registered there:
+- `Learn.code-context-extractor.cce.agents.graph.planner_node (cce\agents\graph.py:75-75)`
+- `Learn.code-context-extractor.cce.agents.graph.retriever_node (cce\agents\graph.py:76-76)`
+- `Learn.code-context-extractor.cce.agents.graph.reasoner_node (cce\agents\graph.py:77-77)`
+- `Learn.code-context-extractor.cce.agents.graph.responder_node (cce\agents\graph.py:78-78)`
+
+But the actual “start to finish” indexing pipeline is not present in the retrieved context, so I can’t describe it accurately from these sources alone.
+
+Citations (10):
+  - graph._ensure_bg_loop  @  cce\agents\graph.py:35
+  - graph._build_checkpointer  @  cce\agents\graph.py:46
+  - graph._build  @  cce\agents\graph.py:59
+  - graph.get_agent_graph  @  cce\agents\graph.py:71
+  - Learn.code-context-extractor.cce.agents.graph.planner_node  @  cce\agents\graph.py:75
+  - Learn.code-context-extractor.cce.agents.graph.retriever_node  @  cce\agents\graph.py:76
+  - Learn.code-context-extractor.cce.agents.graph.reasoner_node  @  cce\agents\graph.py:77
+  - Learn.code-context-extractor.cce.agents.graph.responder_node  @  cce\agents\graph.py:78
+  - llm._ensure_api_key_loaded  @  cce\agents\llm.py:66
+  - llm._build_llm  @  cce\agents\llm.py:80
+
+Reasoning steps (9):
+  - loop 1: 21 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body
+  - loop 2: 21 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body
+  - loop 3: 21 items retrieved
+  - tools returned 1 error(s) — retrying
+  - coverage gaps: has_subject_symbol, has_symbol_body
+==============================================================================
+[9/9]  thread_id=auto-20260423_152554-09  elapsed=11.20s
+------------------------------------------------------------------------------
+Q: How does authentication work in this codebase?
+
+A:
+Authentication appears to be API-key based in the FastAPI server, with optional rate limiting:
+
+- `auth.APIKeyMiddleware.dispatch (cce\server\auth.py:37-50)` is the middleware entrypoint that enforces auth on requests.
+- `auth._Bucket.consume (cce\server\auth.py:63-72)` implements a token-bucket check, and `auth._Bucket (cce\server\auth.py:55-72)` is the per-client bucket used for rate limiting.
+- `app.lifespan (cce\server\app.py:21-53)` initializes shared server resources on startup.
+- `cce\config.py (cce\config.py:0)` indicates config includes “API key auth — empty list = no auth required (dev default)” and a per-IP token-bucket rate limit.
+
+For token-style user auth, the only explicit example in the retrieved context is a stub:
+- `deps.get_current_user (tests\fixtures\sample_fastapi\deps.py:16-20)` says “Validate Bearer token and return current user (stub).”
+
+I can’t give a more exact end-to-end flow from the retrieved context alone.
+
+Citations (10):
+  - deps.get_current_user  @  tests\fixtures\sample_fastapi\deps.py:16
+  - auth._Bucket  @  cce\server\auth.py:55
+  - django_extractor.DjangoExtractor._extract_middleware  @  cce\extractors\django_extractor.py:461
+  - auth.APIKeyMiddleware.dispatch  @  cce\server\auth.py:37
+  - auth._Bucket.consume  @  cce\server\auth.py:63
+  - hybrid._mmr  @  cce\retrieval\hybrid.py:90
+  - test_phase7_semantic.test_chunk_node_token_count_positive  @  tests\test_phase7_semantic.py:68
+  - dataset.EvalDataset.from_yaml  @  cce\eval\dataset.py:41
+  - chunker._count_tokens  @  cce\embeddings\chunker.py:45
+  - app.lifespan  @  cce\server\app.py:21
+
+Reasoning steps (5):
+  - loop 1: 11 items retrieved
+  - loop 2: 11 items retrieved
+  - tools returned 1 error(s) — retrying
+  - loop 3: 27 items retrieved
+  - tools returned 2 error(s) — retrying

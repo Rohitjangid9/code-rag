@@ -75,7 +75,7 @@ class AgentSettings(BaseModel):
     """LangGraph agent runtime configuration."""
 
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5.4-mini-2026-03-17"
     llm_temperature: float = 0.0
     # F11: optional per-role model overrides; fall back to llm_model when None.
     planner_model: str | None = None
@@ -115,6 +115,23 @@ class IndexerSettings(BaseModel):
 
     # Worker threads for parallel per-file parsing; 0 = use os.cpu_count()
     workers: int = 4
+
+    # ── Indexing diagnostics (all off by default) ─────────────────────────
+    # Enable with .env entries, e.g.:
+    #   CCE_INDEXER__VERBOSE=true
+    #   CCE_INDEXER__LOG_FILE=.cce/indexer.log
+    #   CCE_INDEXER__JEDI_DEBUG=true
+    #   CCE_INDEXER__EDGE_DEBUG=true
+
+    # Per-file summary line at INFO level: symbols / edges / jedi hits
+    verbose: bool = False
+    # Write all indexer logs to this file (in addition to console).
+    # Path is relative to the repo root unless absolute.
+    log_file: Path | None = None
+    # Log every Jedi Script creation, call-site count, and goto() result
+    jedi_debug: bool = False
+    # Log per-file edge breakdown by kind (IMPORTS/CALLS/REFERENCES/…)
+    edge_debug: bool = False
 
 
 class StoreSettings(BaseModel):

@@ -197,11 +197,16 @@ class HybridRetriever:
                 prov.append("lex")
             if node_id in vec_set:
                 prov.append("vec")
+            # F-BODY: seed snippet with symbol body from lex_sym_fts so the
+            # reasoner's has_symbol_body axis (len > 50) is satisfied without
+            # an extra get_file_slice() round-trip.
+            body_snippet = self._fetch_body_snippet(node.qualified_name)
+            snippet = body_snippet or node.signature or node.name
             results[node_id] = HybridResult(
                 node_id=node_id, node=node,
                 path=node.file_path,
                 line_start=node.line_start, line_end=node.line_end,
-                snippet=node.signature or node.name,
+                snippet=snippet,
                 rrf_score=score,
                 provenance=prov,
                 chunk_header=build_header(node),
@@ -296,6 +301,23 @@ class HybridRetriever:
             log.debug("Vector search skipped: %s", exc)
             return []
 
+    def _fetch_body_snippet(self, qualified_name: str) -> str:
+        """Return the stored symbol body from lex_sym_fts (up to 400 chars).
+
+        Falls back to ``""`` when no record is found so callers can safely
+        fall through to the signature-based snippet.
+        """
+        try:
+            row = self._lex._db.conn.execute(
+                "SELECT content FROM lex_sym_fts WHERE qualified_name = ? LIMIT 1",
+                (qualified_name,),
+            ).fetchone()
+            if row:
+                return row["content"][:400]
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
     def _graph_expand(self, top_ids: list[str], results: dict[str, HybridResult]) -> None:
         """1-hop expansion; adds neighbors to *results* in-place with provenance='graph'."""
         for node_id in top_ids:
@@ -305,11 +327,12 @@ class HybridRetriever:
                 continue
             for neighbor in sg.nodes:
                 if neighbor.id not in results:
+                    body = self._fetch_body_snippet(neighbor.qualified_name)
                     results[neighbor.id] = HybridResult(
                         node_id=neighbor.id, node=neighbor,
                         path=neighbor.file_path,
                         line_start=neighbor.line_start, line_end=neighbor.line_end,
-                        snippet=neighbor.signature or neighbor.name,
+                        snippet=body or neighbor.signature or neighbor.name,
                         rrf_score=0.05,   # below any directly-retrieved result
                         provenance=["graph"],
                         chunk_header=build_header(neighbor),

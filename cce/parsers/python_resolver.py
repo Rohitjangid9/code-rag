@@ -45,8 +45,12 @@ def clear_jedi_project_cache() -> None:
 def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
     """Return CALLS + REFERENCES edges for a Python file using Jedi.
 
-    Falls back to tree-sitter heuristics if Jedi is unavailable or slow.
+    Falls back to tree-sitter heuristics when Jedi is unavailable.
     F27: re-uses a module-level cached ``jedi.Project`` per root path.
+
+    Diagnostic logging is controlled by the indexer settings in .env:
+        CCE_INDEXER__JEDI_DEBUG=true  – log Script creation + call-site counts
+        CCE_INDEXER__VERBOSE=true     – log edge summary per file
     """
     try:
         import jedi  # noqa: PLC0415
@@ -54,37 +58,91 @@ def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
         log.warning("jedi not installed — skipping Python reference resolution")
         return []
 
+    # Read diagnostic flags from settings (lazy import to avoid circular deps)
+    try:
+        from cce.config import get_settings as _gs  # noqa: PLC0415
+        _cfg = _gs().indexer
+        _jedi_debug = _cfg.jedi_debug
+        _verbose = _cfg.verbose
+    except Exception:  # noqa: BLE001
+        _jedi_debug = False
+        _verbose = False
+
     edges: list[RawEdge] = []
     source = parsed.source
-    module_qname = file_to_module_qname(parsed.path, root)
 
     try:
         project = _get_jedi_project(root)  # F27: cached project
         script = jedi.Script(code=source, path=str(parsed.path), project=project)
+        log.debug("Jedi Script created for %s", parsed.rel_path)
     except Exception as exc:  # noqa: BLE001
-        log.debug("Jedi Script init failed for %s: %s", parsed.rel_path, exc)
+        log.warning("Jedi Script init failed for %s: %s", parsed.rel_path, exc)
+        log.debug("Jedi init traceback:", exc_info=True)
         return _heuristic_python(parsed, root)
 
-    # Find all call expressions in the file
+    # Build AST once for call-site + reference-site discovery
     src_bytes = source.encode("utf-8", errors="replace")
     tree = _get_parser(Language.PYTHON).parse(src_bytes)
     call_sites = _find_call_nodes(tree.root_node, src_bytes)
+    ref_sites   = _find_reference_sites(tree.root_node, src_bytes, parsed, root)
 
+    if _jedi_debug:
+        log.debug(
+            "jedi resolve  %-55s  call_sites=%d  ref_sites=%d  parsed_nodes=%d",
+            parsed.rel_path, len(call_sites), len(ref_sites), len(parsed.nodes),
+        )
+        # Probe the first call site so we can see what goto() really returns
+        if call_sites:
+            _cn = call_sites[0]
+            _ln, _col = _cn.start_point[0] + 1, _cn.start_point[1]
+            try:
+                _probe_defs = script.goto(line=_ln, column=_col,
+                                          follow_imports=True,
+                                          follow_builtin_imports=False)
+                _probe_info = [
+                    f"name={d.name} module_path={d.module_path} full_name={d.full_name}"
+                    for d in _probe_defs
+                ]
+                log.debug("jedi probe    %-55s  goto(%d,%d) -> %d defs: %s",
+                          parsed.rel_path, _ln, _col, len(_probe_defs),
+                          _probe_info[:3])
+            except Exception as _pe:
+                log.debug("jedi probe    %-55s  goto(%d,%d) EXCEPTION: %s",
+                          parsed.rel_path, _ln, _col, _pe)
+
+    # ── CALLS edges ───────────────────────────────────────────────────────────
+    calls_found = 0
+    _first_call_logged = False
     for call_node, caller_qname in _associate_calls_to_symbols(call_sites, src_bytes, parsed, root):
         line = call_node.start_point[0] + 1
         col  = call_node.start_point[1]
-        callee_name = _text(call_node, src_bytes)
 
         try:
             defs = script.goto(line=line, column=col, follow_imports=True, follow_builtin_imports=False)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.debug("goto() failed at %s:%d — %s", parsed.rel_path, line, exc)
             continue
+
+        # Trace the first call result to compare with the probe
+        if _jedi_debug and not _first_call_logged:
+            _first_call_logged = True
+            log.debug(
+                "jedi loop[0]  %-55s  goto(%d,%d) -> %d defs",
+                parsed.rel_path, line, col, len(defs),
+            )
+            for _d in defs:
+                log.debug("  def: name=%s module_path=%s module_path_is_none=%s",
+                          _d.name, _d.module_path, _d.module_path is None)
 
         for d in defs:
             if d.module_path is None:
                 continue
             callee_qname = _jedi_def_to_qname(d, root)
             if callee_qname and callee_qname != caller_qname:
+                log.debug(
+                    "CALLS  %s -> %s  @ line %d",
+                    caller_qname, callee_qname, line,
+                )
                 edges.append(RawEdge(
                     src_id=_node_id_from_qname(caller_qname),
                     dst_qualified_name=callee_qname,
@@ -94,21 +152,29 @@ def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
                     resolver_method="jedi",
                     confidence=1.0,
                 ))
+                calls_found += 1
 
-    # F6: REFERENCES edges — identifiers passed as args, decorators, dict/list values, getattr
-    ref_sites = _find_reference_sites(tree.root_node, src_bytes, parsed, root)
+    # ── REFERENCES edges (args, decorators, dict values, …) ──────────────────
+    refs_found = 0
     for ref_node, src_qname, confidence in ref_sites:
         line = ref_node.start_point[0] + 1
-        col = ref_node.start_point[1]
+        col  = ref_node.start_point[1]
+
         try:
             defs = script.goto(line=line, column=col, follow_imports=True, follow_builtin_imports=False)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.debug("goto() failed at %s:%d — %s", parsed.rel_path, line, exc)
             continue
+
         for d in defs:
             if d.module_path is None:
                 continue
             dst_qname = _jedi_def_to_qname(d, root)
             if dst_qname and dst_qname != src_qname:
+                log.debug(
+                    "REFERENCES  %s -> %s  @ line %d  conf=%.1f",
+                    src_qname, dst_qname, line, confidence,
+                )
                 edges.append(RawEdge(
                     src_id=_node_id_from_qname(src_qname),
                     dst_qualified_name=dst_qname,
@@ -118,8 +184,9 @@ def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
                     resolver_method="jedi",
                     confidence=confidence,
                 ))
+                refs_found += 1
 
-    # F6: getattr(module, "name") dynamic lookups (heuristic, low confidence)
+    # ── getattr() dynamic lookups (heuristic, low confidence) ────────────────
     for ref_node, src_qname, name in _find_getattr_references(tree.root_node, src_bytes, parsed, root):
         line = ref_node.start_point[0] + 1
         edges.append(RawEdge(
@@ -131,6 +198,12 @@ def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
             resolver_method="getattr-heuristic",
             confidence=0.4,
         ))
+
+    if _verbose or _jedi_debug:
+        log.debug(
+            "jedi result   %-55s  CALLS=%d  REFERENCES=%d  total_edges=%d",
+            parsed.rel_path, calls_found, refs_found, len(edges),
+        )
 
     return edges
 

@@ -261,10 +261,18 @@ class IndexPipeline:
         active_frameworks,
         workers: int | None,
     ) -> None:
-        """Parse files in a thread pool; apply writes serially (F28)."""
+        """Parse files in a thread pool; apply writes in two serial passes (F28).
+
+        Pass 1 – collect all parse results and commit symbols/lexical data so
+                  every symbol is visible in the DB before edge resolution runs.
+        Pass 2 – run Jedi reference resolution now that the full symbol table is
+                  available, preventing race-condition drops where graph.py
+                  references nodes.py symbols that weren't indexed yet.
+        """
         if not files:
             return
 
+        results: list[_FileParseResult] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -276,11 +284,22 @@ class IndexPipeline:
                 wf = futures[future]
                 try:
                     result = future.result()
-                    self._apply_parsed(result, layers, stats)
+                    # Pass 1: symbols + lexical only (no Jedi edge resolution yet)
+                    self._apply_symbols(result, layers, stats)
+                    results.append(result)
                 except Exception as exc:  # noqa: BLE001
                     msg = f"error indexing {wf.rel_path}: {exc}"
                     log.warning(msg)
                     stats.errors.append(msg)
+
+        # Pass 2: all symbols committed — now safe to resolve cross-file references
+        for result in results:
+            try:
+                self._apply_edges(result, layers, stats)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"error resolving edges for {result.rel}: {exc}"
+                log.warning(msg)
+                stats.errors.append(msg)
 
     def _parse_file_worker(
         self,
@@ -296,8 +315,11 @@ class IndexPipeline:
         serially in ``_apply_parsed`` to avoid race conditions.
         """
         source = wf.path.read_text(encoding="utf-8", errors="replace")
-        rel = str(wf.rel_path)
-        result = _FileParseResult(wf=wf, rel=rel, source=source, root=root)
+        # F-WIN: always use POSIX (forward-slash) paths so the "/"
+        # presence check and split("/") in parsers / extractors work on
+        # Windows as well as Linux/macOS.
+        rel = wf.rel_path.as_posix()
+        result = _FileParseResult(wf=wf, rel=rel, source=source, root=root)  # rel is POSIX
 
         parsed: ParsedFile | None = None
         if "symbols" in layers or "graph" in layers or "framework" in layers:
@@ -328,15 +350,15 @@ class IndexPipeline:
 
         return result
 
-    def _apply_parsed(self, result: _FileParseResult, layers: list[str], stats: IndexStats) -> None:
-        """Serialised write phase: Jedi resolve + store writes (F28).
+    def _apply_symbols(self, result: _FileParseResult, layers: list[str], stats: IndexStats) -> None:
+        """Pass 1: write lexical data + symbols only.  No edge resolution yet.
 
-        All non-thread-safe operations (Jedi, SQLite writes) happen here on the
-        main thread after the parallel parse workers have finished.
+        Called for every file in the thread-pool completion loop so all symbols
+        are committed to the DB before cross-file Jedi resolution runs in Pass 2.
         """
         rel = result.rel
         source = result.source
-        parsed: ParsedFile | None = getattr(result, "_parsed", None)
+        cfg = self._settings.indexer
 
         # Phase 2 — lexical (file-level)
         if "lexical" in layers:
@@ -345,29 +367,56 @@ class IndexPipeline:
                 self._lex.upsert_symbol(rel, qname, ls, le, body)  # type: ignore[union-attr]
 
         # Phase 3 — symbol store
+        sym_count = len(result.nodes)
         if result.nodes:
             self._sym.delete_for_file(rel)  # type: ignore[union-attr]
             self._sym.upsert_many(result.nodes)  # type: ignore[union-attr]
-            stats.symbols_indexed += len(result.nodes)
+            stats.symbols_indexed += sym_count
 
         # Router prefixes (framework extractor)
         self._router_prefixes.update(result.router_prefixes)
 
+        if cfg.verbose:
+            log.debug(
+                "[pass1] %-55s  symbols=%d  ast_edges=%d",
+                rel, sym_count, len(result.raw_edges),
+            )
+
+    def _apply_edges(self, result: _FileParseResult, layers: list[str], stats: IndexStats) -> None:
+        """Pass 2: Jedi resolution + graph edges.
+
+        Runs AFTER all symbols from all files are committed so cross-file
+        ``resolve_qname`` calls succeed regardless of processing order.
+        """
+        rel = result.rel
+        parsed: ParsedFile | None = getattr(result, "_parsed", None)
+        cfg = self._settings.indexer
+
         # Phase 4/5 — Jedi resolution + graph edges (serial — Jedi is not thread-safe)
         if "graph" in layers and parsed is not None:
             raw_edges = list(result.raw_edges)
-            raw_edges += self._resolve_references(parsed, root=result.root)
+            jedi_edges = self._resolve_references(parsed, root=result.root)
+            raw_edges += jedi_edges
+
+            log.debug(
+                "[pass2] %-55s  ast=%d  jedi=%d  total=%d",
+                rel, len(result.raw_edges), len(jedi_edges), len(raw_edges),
+            )
+
             if raw_edges:
                 self._graph.delete_for_file(rel)  # type: ignore[union-attr]
-                # F-M13: purge any previous API refs recorded for this file so
-                # re-indexing cannot leak stale entries into the linker.
+                # F-M13: purge any previous API refs recorded for this file
                 self._db.conn.execute(  # type: ignore[union-attr]
                     "DELETE FROM api_refs WHERE file_path = ?", (rel,),
                 )
+
+                # Counters for edge-kind breakdown (edge_debug)
+                written: dict[str, int] = {}
+                dropped = 0
+                api_deferred = 0
+
                 for re_ in raw_edges:
-                    # F-M13: defer unresolvable ``api:/path`` REFERENCES to the
-                    # API linker post-pass (they cannot resolve during parsing
-                    # because backend routes may not yet be indexed).
+                    # F-M13: defer api:// REFERENCES to the linker post-pass
                     if re_.dst_qualified_name.startswith("api:"):
                         self._db.conn.execute(  # type: ignore[union-attr]
                             "INSERT INTO api_refs "
@@ -382,7 +431,9 @@ class IndexPipeline:
                                 re_.confidence,
                             ),
                         )
+                        api_deferred += 1
                         continue
+
                     dst_id = self._graph.resolve_qname(re_.dst_qualified_name)  # type: ignore[union-attr]
                     if dst_id:
                         self._graph.upsert_edge(  # type: ignore[union-attr]
@@ -394,6 +445,30 @@ class IndexPipeline:
                             confidence=re_.confidence,
                         )
                         stats.edges_indexed += 1
+                        kind_key = re_.kind.value
+                        written[kind_key] = written.get(kind_key, 0) + 1
+                        # F-LG-META: merge dst_meta_patch into the resolved symbol
+                        if re_.dst_meta_patch:
+                            self._sym.merge_meta(dst_id, re_.dst_meta_patch)  # type: ignore[union-attr]
+                    else:
+                        dropped += 1
+                        log.debug(
+                            "[pass2] unresolvable dst=%s  kind=%s  src=%s",
+                            re_.dst_qualified_name, re_.kind.value, rel,
+                        )
+
+                # Per-file summary when verbose is on
+                if cfg.verbose:
+                    total_written = sum(written.values())
+                    log.debug(
+                        "[pass2] %-55s  written=%d  dropped=%d  api_deferred=%d",
+                        rel, total_written, dropped, api_deferred,
+                    )
+
+                # Detailed edge-kind breakdown when edge_debug is on
+                if cfg.edge_debug and written:
+                    breakdown = "  ".join(f"{k}={v}" for k, v in sorted(written.items()))
+                    log.debug("[pass2:kinds] %s  →  %s", rel, breakdown)
 
     # ── Phase 7 — semantic embedding ──────────────────────────────────────────
 

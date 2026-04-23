@@ -457,7 +457,14 @@ class TreeSitterParser:
     def parse(self, path: Path, rel_path: str, language: Language, source: str) -> ParsedFile:
         src = source.encode("utf-8", errors="replace")
         parsed = ParsedFile(path=path, rel_path=rel_path, language=language, source=source)
-        root = path.parents[len(path.parts) - len(rel_path.split("/")) - 1] if "/" in rel_path else path.parent
+        # F-WIN: normalise to forward slashes so the formula works on Windows.
+        # Correct formula: go up (R-1) parent levels from the file's immediate
+        # parent, where R = number of components in the relative path.
+        # This equals path.parents[R-1] and is independent of the absolute
+        # path depth — fixing the previous formula that broke on deep repos.
+        _rel = rel_path.replace("\\", "/")
+        _parts = _rel.split("/")
+        root = path.parents[len(_parts) - 1] if len(_parts) > 1 else path.parent
 
         try:
             if language == Language.PYTHON:

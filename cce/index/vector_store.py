@@ -37,13 +37,13 @@ class VectorStore:
     # ── Collection management ─────────────────────────────────────────────────
 
     def collection_name(self, root: Path) -> str:
-        """Deterministic collection name from the repo root path."""
-        h = hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:12]
-        return f"cce_{h}"
+        """Deterministic collection name from the repo root path.
 
-    def collection_name_from_db(self, db_path: Path) -> str:
-        """Derive collection name from the SQLite DB path (used without root)."""
-        h = hashlib.sha1(str(db_path.resolve()).encode()).hexdigest()[:12]
+        F-M3: single source of truth — every producer and consumer hashes the
+        repo root.  The previous ``collection_name_from_db`` helper was removed
+        because it hashed a different path and silently broke vector search.
+        """
+        h = hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:12]
         return f"cce_{h}"
 
     def collection_exists(self, collection: str) -> bool:
@@ -93,11 +93,40 @@ class VectorStore:
                     "framework_tag": c.framework_tag,
                     "header": c.header,
                     "body_preview": c.body[:300],
+                    "content_hash": c.content_hash,  # F21
                 },
             )
             for c, vec in chunks_and_vectors
         ]
         self._client.upsert(collection_name=collection, points=points)
+
+    def get_existing_hashes(self, collection: str, node_ids: list[str]) -> dict[str, str]:
+        """Return {node_id: content_hash} for all existing vectors for *node_ids* (F21).
+
+        Used to skip re-embedding chunks whose content hasn't changed.
+        """
+        from qdrant_client.models import FieldCondition, Filter, MatchAny  # noqa: PLC0415
+
+        if not node_ids or not self.collection_exists(collection):
+            return {}
+        try:
+            resp = self._client.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="node_id", match=MatchAny(any=node_ids))]
+                ),
+                with_payload=True,
+                limit=len(node_ids) * 3,  # one node may have multiple chunks
+            )
+            result: dict[str, str] = {}
+            for point in resp[0]:
+                nid = (point.payload or {}).get("node_id", "")
+                h = (point.payload or {}).get("content_hash", "")
+                if nid and h:
+                    result[nid] = h
+            return result
+        except Exception:  # noqa: BLE001
+            return {}
 
     def delete_for_node_ids(self, collection: str, node_ids: list[str]) -> None:
         from qdrant_client.models import FieldCondition, Filter, MatchAny  # noqa: PLC0415

@@ -90,6 +90,8 @@ def delete_file_records(rel_path: str, db: DatabaseManager) -> None:
     )
     # Remove lexical entry
     conn.execute("DELETE FROM lex_fts WHERE path = ?", (rel_path,))
+    # F-M13: pending cross-stack api references
+    conn.execute("DELETE FROM api_refs WHERE file_path = ?", (rel_path,))
     # Remove file record
     conn.execute("DELETE FROM files WHERE path = ?", (rel_path,))
     conn.commit()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -140,3 +141,71 @@ def test_pipeline_indexes_fastapi_framework(tmp_path):
     pm_count = conn.execute("SELECT COUNT(*) FROM symbols WHERE kind='PydanticModel'").fetchone()[0]
     assert route_count >= 3
     assert pm_count >= 2
+
+
+def test_cross_file_include_router_prefix(tmp_path):
+    """F4: Routes in one file mounted with a prefix from another file get effective_path."""
+    import json as _json  # noqa: PLC0415
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "main.py").write_text(
+        'from fastapi import FastAPI\n'
+        'from app.routes import router\n\n'
+        'app = FastAPI()\n'
+        'app.include_router(router, prefix="/agent")\n'
+    )
+    (app_dir / "routes.py").write_text(
+        'from fastapi import APIRouter\n\n'
+        'router = APIRouter()\n\n'
+        '@router.post("/query")\n'
+        'def query():\n'
+        '    pass\n'
+    )
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "cross.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(tmp_path, layers=["lexical", "symbols", "graph", "framework"])
+
+    conn = pipeline.symbol_store._db.conn
+    row = conn.execute(
+        "SELECT meta FROM symbols WHERE kind='Route' AND json_extract(meta,'$.local_path') = '/query'"
+    ).fetchone()
+    assert row is not None
+    meta = _json.loads(row["meta"])
+    assert meta.get("effective_path") == "/agent/query"
+
+    # F5: find_route_handler should resolve the cross-file route
+    from cce.retrieval.tools import find_route_handler  # noqa: PLC0415
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        info = find_route_handler("POST", "/agent/query")
+    assert info.handler_qname.endswith(".query")
+
+
+def test_list_routes_returns_routes(tmp_path):
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import list_routes  # noqa: PLC0415
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "routes.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(FIXTURES, layers=["lexical", "symbols", "graph", "framework"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        routes = list_routes()
+    assert len(routes) >= 3
+    # Each route should have an effective_path (same as path when no cross-file prefix)
+    for r in routes:
+        assert r.effective_path is not None

@@ -5,9 +5,34 @@ from __future__ import annotations
 import json
 
 from cce.graph.base import GraphStore
-from cce.graph.schema import Edge, EdgeKind, Node, SubGraph
+from cce.graph.schema import Edge, EdgeKind, Language, Node, NodeKind, SubGraph
 from cce.index.db import DatabaseManager
 from cce.index.symbol_store import _row_to_node
+
+
+def _synthesize_module_node(src_id: str, file_path: str) -> Node:
+    """Build a placeholder Module Node for edges whose src is module-scope code."""
+    norm = file_path.replace("\\", "/")
+    stem = norm.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    qname = norm.rsplit(".", 1)[0].replace("/", ".") or stem
+    ext = norm.rsplit(".", 1)[-1].lower() if "." in norm else ""
+    lang = {
+        "py": Language.PYTHON,
+        "js": Language.JAVASCRIPT,
+        "ts": Language.TYPESCRIPT,
+        "tsx": Language.TSX,
+        "jsx": Language.JSX,
+    }.get(ext, Language.PYTHON)
+    return Node(
+        id=src_id,
+        kind=NodeKind.MODULE,
+        qualified_name=qname,
+        name=stem,
+        file_path=file_path,
+        line_start=0,
+        line_end=0,
+        language=lang,
+    )
 
 
 class SQLiteGraphStore:
@@ -34,10 +59,12 @@ class SQLiteGraphStore:
         confidence: float = 1.0,
     ) -> None:
         conn = self._db.conn
-        # Avoid exact duplicates
+        # Avoid exact duplicates — include (file_path, line) so two distinct
+        # usage sites (e.g. REFERENCES at different lines) are preserved.
         exists = conn.execute(
-            "SELECT 1 FROM edges WHERE src_id=? AND dst_id=? AND kind=?",
-            (src_id, dst_id, kind.value),
+            "SELECT 1 FROM edges WHERE src_id=? AND dst_id=? AND kind=? "
+            "AND file_path=? AND line=?",
+            (src_id, dst_id, kind.value, file_path, line),
         ).fetchone()
         if not exists:
             conn.execute(
@@ -110,14 +137,22 @@ class SQLiteGraphStore:
         edges = [_row_to_edge(r) for r in edge_rows]
         return SubGraph(root_id=node_id, nodes=nodes, edges=edges)
 
-    def find_callers(self, node_id: str) -> list[Node]:
+    def find_callers(self, node_id: str, include_refs: bool = True) -> list[Node]:
+        kinds = [EdgeKind.CALLS.value, EdgeKind.REFERENCES.value] if include_refs else [EdgeKind.CALLS.value]
+        placeholders = ",".join("?" * len(kinds))
         rows = self._db.conn.execute(
-            "SELECT s.* FROM symbols s "
-            "JOIN edges e ON s.id = e.src_id "
-            "WHERE e.dst_id = ? AND e.kind = ?",
-            (node_id, EdgeKind.CALLS.value),
+            f"SELECT e.src_id AS _edge_src_id, e.file_path AS _edge_file_path, s.* "
+            f"FROM edges e LEFT JOIN symbols s ON s.id = e.src_id "
+            f"WHERE e.dst_id = ? AND e.kind IN ({placeholders})",
+            (node_id, *kinds),
         ).fetchall()
-        return [_row_to_node(r) for r in rows]
+        out: list[Node] = []
+        for r in rows:
+            if r["id"] is not None:
+                out.append(_row_to_node(r))
+            else:
+                out.append(_synthesize_module_node(r["_edge_src_id"], r["_edge_file_path"] or ""))
+        return out
 
     def find_callees(self, node_id: str) -> list[Node]:
         rows = self._db.conn.execute(

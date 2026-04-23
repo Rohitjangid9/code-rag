@@ -6,7 +6,7 @@ get_api_flow, semantic search) raise NotImplementedError until those phases land
 
 from __future__ import annotations
 
-from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -28,6 +28,7 @@ class Hit(BaseModel):
 
 class RouteInfo(BaseModel):
     pattern: str
+    effective_path: str | None = None
     methods: list[str] = Field(default_factory=list)
     handler_qname: str
     framework: str
@@ -53,25 +54,46 @@ class GrepHit(BaseModel):
     text: str
 
 
-# ── Store access helper ────────────────────────────────────────────────────────
+# ── Store access helpers (F-M2: repo-keyed caches) ────────────────────────────
 
-@lru_cache(maxsize=1)
-def _pipeline():
-    from cce.indexer import IndexPipeline  # noqa: PLC0415
-    return IndexPipeline()
+_pipelines: dict[Path, object] = {}
+_hybrid_retrievers: dict[Path, object] = {}
 
 
-@lru_cache(maxsize=1)
-def _hybrid_retriever():
-    from cce.retrieval.hybrid import HybridRetriever  # noqa: PLC0415
+def _cache_key(repo_root: Path | None = None) -> Path:
+    """Stable key — the resolved sqlite_db path of the active repo."""
     from cce.config import get_settings  # noqa: PLC0415
-    p = _pipeline()
-    return HybridRetriever(
-        sym_store=p.symbol_store,
-        lex_store=p.lexical_store,
-        graph_store=p.graph_store,
-        settings=get_settings(),
-    )
+    return get_settings(repo_root=repo_root).paths.sqlite_db.resolve()
+
+
+def _pipeline(repo_root: Path | None = None):
+    from cce.config import get_settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    key = _cache_key(repo_root)
+    if key not in _pipelines:
+        _pipelines[key] = IndexPipeline(settings=get_settings(repo_root=repo_root))
+    return _pipelines[key]
+
+
+def _hybrid_retriever(repo_root: Path | None = None):
+    from cce.config import get_settings  # noqa: PLC0415
+    from cce.retrieval.hybrid import HybridRetriever  # noqa: PLC0415
+    key = _cache_key(repo_root)
+    if key not in _hybrid_retrievers:
+        p = _pipeline(repo_root)
+        _hybrid_retrievers[key] = HybridRetriever(
+            sym_store=p.symbol_store,
+            lex_store=p.lexical_store,
+            graph_store=p.graph_store,
+            settings=get_settings(repo_root=repo_root),
+        )
+    return _hybrid_retrievers[key]
+
+
+def reset_retrieval_cache() -> None:
+    """Test helper: drop pipeline/retriever caches so new settings are picked up."""
+    _pipelines.clear()
+    _hybrid_retrievers.clear()
 
 
 # ── Implemented (Phases 1-5) ──────────────────────────────────────────────────
@@ -89,6 +111,20 @@ def search_code(
     - semantic: Qdrant vector only (requires Phase 7 index)
     - auto:     hybrid if index exists, else lexical
     """
+    from cce.telemetry import get_tracer  # noqa: PLC0415
+    with get_tracer().start_as_current_span("cce.search_code") as span:  # F33
+        span.set_attribute("query", query[:200])
+        span.set_attribute("mode", mode)
+        span.set_attribute("k", k)
+        return _search_code_impl(query, mode, k, filters)
+
+
+def _search_code_impl(
+    query: str,
+    mode: Literal["auto", "lexical", "semantic", "hybrid"] = "auto",
+    k: int = 10,
+    filters: dict | None = None,
+) -> list[Hit]:
     if mode == "semantic":
         return _semantic_search(query, k, filters)
 
@@ -120,7 +156,7 @@ def search_code(
         return [_hr_to_hit(r) for r in results]
     except Exception:  # noqa: BLE001
         # fallback to lexical if hybrid fails
-        return search_code(query, mode="lexical", k=k, filters=filters)
+        return _search_code_impl(query, mode="lexical", k=k, filters=filters)
 
 
 def _hr_to_hit(r) -> Hit:
@@ -154,12 +190,12 @@ def find_references(qualified_name: str) -> list[Location]:
     return [e.location for e in edges if e.location]
 
 
-def find_callers(qualified_name: str) -> list[Node]:
+def find_callers(qualified_name: str, include_refs: bool = True) -> list[Node]:
     p = _pipeline()
     node = p.symbol_store.get_by_qname(qualified_name)
     if not node:
         return []
-    return p.graph_store.find_callers(node.id)
+    return p.graph_store.find_callers(node.id, include_refs=include_refs)
 
 
 def find_implementations(qualified_name: str) -> list[Node]:
@@ -186,6 +222,41 @@ def get_neighborhood(
 
 # ── Phase 6: framework-aware tools ────────────────────────────────────────────
 
+def find_route_handler(method: str, path: str) -> RouteInfo:
+    """Return the route that matches *method* and *path* exactly.
+
+    Queries by ``effective_path`` (F4) first, then falls back to ``path`` / ``name``.
+    Raises ``KeyError`` when no match exists.
+    """
+    conn = _pipeline().symbol_store._db.conn
+    rows = conn.execute(
+        "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern') "
+        "AND (json_extract(meta,'$.effective_path') = ? OR json_extract(meta,'$.path') = ? OR name = ?)",
+        (path, path, path),
+    ).fetchall()
+
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+
+    for r in rows:
+        node = _row_to_node(r)
+        meta = node.meta or {}
+        methods = meta.get("methods", [])
+        if isinstance(methods, str):
+            methods = [methods]
+        if method.upper() in [m.upper() for m in methods]:
+            handler_qname = meta.get("handler", meta.get("view_ref", ""))
+            return RouteInfo(
+                pattern=node.name,
+                effective_path=meta.get("effective_path") or node.name,
+                methods=methods,
+                handler_qname=handler_qname,
+                framework=node.framework_tag.value if node.framework_tag else "unknown",
+                request_model=meta.get("request_model"),
+                response_model=meta.get("response_model"),
+            )
+    raise KeyError(f"No route found for {method} {path}")
+
+
 def get_route(pattern_or_path: str) -> RouteInfo:
     """Resolve a URL path or pattern to its handler + response model.
 
@@ -196,15 +267,15 @@ def get_route(pattern_or_path: str) -> RouteInfo:
 
     rows = conn.execute(
         "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern') "
-        "AND (name = ? OR json_extract(meta,'$.pattern') = ? OR json_extract(meta,'$.path') = ?)",
-        (pattern_or_path, pattern_or_path, pattern_or_path),
+        "AND (name = ? OR json_extract(meta,'$.pattern') = ? OR json_extract(meta,'$.path') = ? OR json_extract(meta,'$.effective_path') = ?)",
+        (pattern_or_path, pattern_or_path, pattern_or_path, pattern_or_path),
     ).fetchall()
 
     if not rows:
         # partial match
         rows = conn.execute(
-            "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern') AND name LIKE ?",
-            (f"%{pattern_or_path}%",),
+            "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern') AND (name LIKE ? OR json_extract(meta,'$.effective_path') LIKE ?)",
+            (f"%{pattern_or_path}%", f"%{pattern_or_path}%"),
         ).fetchall()
 
     if not rows:
@@ -220,6 +291,7 @@ def get_route(pattern_or_path: str) -> RouteInfo:
         methods = [methods]
     return RouteInfo(
         pattern=node.name,
+        effective_path=meta.get("effective_path") or node.name,
         methods=methods,
         handler_qname=handler_qname,
         framework=node.framework_tag.value if node.framework_tag else "unknown",
@@ -482,13 +554,13 @@ def list_symbols(
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY file_path, line_start LIMIT ?"
-    params.append(max(1, min(limit, 2000)))
+    params.append(max(1, min(limit, 1000)))
 
     from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
     return [_row_to_node(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def list_routes(framework: str | None = None) -> list[RouteInfo]:
+def list_routes(framework: str | None = None, limit: int = 200) -> list[RouteInfo]:
     """Enumerate every HTTP route/URL pattern in the index."""
     conn = _pipeline().symbol_store._db.conn
     sql = "SELECT * FROM symbols WHERE kind IN ('Route','URLPattern')"
@@ -496,7 +568,8 @@ def list_routes(framework: str | None = None) -> list[RouteInfo]:
     if framework:
         sql += " AND framework_tag = ?"
         params.append(framework.lower())
-    sql += " ORDER BY file_path, line_start"
+    sql += " ORDER BY file_path, line_start LIMIT ?"
+    params.append(max(1, min(limit, 1000)))
 
     from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
     out: list[RouteInfo] = []
@@ -507,8 +580,10 @@ def list_routes(framework: str | None = None) -> list[RouteInfo]:
         if isinstance(methods, str):
             methods = [methods]
         pattern = meta.get("path") or meta.get("pattern") or node.name
+        effective = meta.get("effective_path") or pattern
         out.append(RouteInfo(
             pattern=pattern,
+            effective_path=effective,
             methods=methods,
             handler_qname=meta.get("handler", meta.get("view_ref", "")),
             framework=node.framework_tag.value if node.framework_tag else "unknown",
@@ -522,7 +597,7 @@ def list_files(glob: str | None = None, limit: int = 2000) -> list[str]:
     """Return every indexed file path, optionally filtered by a shell-style glob."""
     conn = _pipeline().symbol_store._db.conn
     rows = conn.execute(
-        "SELECT path FROM files ORDER BY path LIMIT ?", (max(1, min(limit, 10000)),)
+        "SELECT path FROM files ORDER BY path LIMIT ?", (max(1, min(limit, 1000)),)
     ).fetchall()
     paths = [r["path"] for r in rows]
     if not glob:
@@ -531,23 +606,94 @@ def list_files(glob: str | None = None, limit: int = 2000) -> list[str]:
     return [p for p in paths if fnmatch.fnmatch(p, glob)]
 
 
-def list_cli_commands() -> list[Node]:
-    """Best-effort CLI command enumeration.
+def _safe_path(path: str) -> str:
+    """Validate and normalise *path* against traversal attacks (F31).
 
-    Until the Typer/Click extractor lands (P1), this returns every Function
-    symbol defined in files whose path ends with ``cli.py`` or ``__main__.py``.
-    Works today for Typer-based CLIs (the common case).
+    Rejects:
+    * Absolute paths (``/etc/passwd``, ``C:\\Windows\\...``)
+    * Any segment containing ``..``
+    * Null bytes or shell metacharacters
+
+    Returns the normalised POSIX-style relative path on success.
+    Raises ``ValueError`` with a descriptive message on failure.
     """
+    from pathlib import Path as _P, PurePosixPath  # noqa: PLC0415
+    if not path or not path.strip():
+        raise ValueError("path must be a non-empty string")
+    if "\x00" in path:
+        raise ValueError(f"Null byte in path: {path!r}")
+    # Reject absolute paths on any platform
+    p = _P(path)
+    if p.is_absolute():
+        raise ValueError(f"Invalid path — absolute paths not allowed: {path!r}")
+    # Reject .. traversal in any segment
+    norm = PurePosixPath(path)
+    if any(part == ".." for part in norm.parts):
+        raise ValueError(f"Invalid path — traversal detected: {path!r}")
+    # Reject shell metacharacters
+    _BAD_CHARS = frozenset('|;&$`<>\'"{}[]!~')
+    if any(c in path for c in _BAD_CHARS):
+        raise ValueError(f"Shell metacharacter in path: {path!r}")
+    return str(norm)
+
+
+def get_file_slice(path: str, start: int, end: int) -> dict:
+    """Return a slice of lines from an indexed file.
+
+    Hard caps: max 200 lines, max 10 KB content.
+    F31: ``_safe_path()`` rejects traversal, absolute paths, and metacharacters.
+    """
+    path = _safe_path(path)  # F31
+
     conn = _pipeline().symbol_store._db.conn
+    row = conn.execute("SELECT content FROM lex_fts WHERE path = ?", (path,)).fetchone()
+    if not row:
+        raise ValueError(f"File not found in index: {path}")
+
+    all_lines = (row["content"] or "").splitlines()
+    total = len(all_lines)
+    start = max(1, start)
+    end = min(end, total, start + 199)
+    selected = all_lines[start - 1:end]
+
+    # 10 KB byte cap
+    while selected and len("\n".join(selected).encode("utf-8")) > 10_240:
+        selected.pop()
+        end -= 1
+
+    return {"path": path, "start": start, "end": end, "lines": selected}
+
+
+def list_cli_commands(limit: int = 200) -> list[Node]:
+    """Enumerate CLI commands found by the CLI extractor (F17).
+
+    Prefers explicit ``CliCommand`` nodes emitted by the Typer/Click/argparse
+    extractor.  Falls back to Functions/Methods in ``cli.py`` / ``__main__.py``
+    so the tool keeps working on codebases that haven't been re-indexed yet.
+    """
+    cap = max(1, min(limit, 1000))
+    conn = _pipeline().symbol_store._db.conn
+    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
+
+    # Prefer dedicated CliCommand nodes (any file, any framework)
+    rows = conn.execute(
+        "SELECT * FROM symbols WHERE kind = 'CliCommand' ORDER BY file_path, line_start LIMIT ?",
+        (cap,),
+    ).fetchall()
+    if rows:
+        return [_row_to_node(r) for r in rows]
+
+    # Fallback: functions in cli.py / __main__.py
     rows = conn.execute(
         """
         SELECT * FROM symbols
-        WHERE kind IN ('Function','Method','CliCommand')
+        WHERE kind IN ('Function','Method')
           AND (file_path LIKE '%cli.py' OR file_path LIKE '%__main__.py')
         ORDER BY file_path, line_start
-        """
+        LIMIT ?
+        """,
+        (cap,),
     ).fetchall()
-    from cce.index.symbol_store import _row_to_node  # noqa: PLC0415
     return [_row_to_node(r) for r in rows]
 
 
@@ -571,6 +717,13 @@ def grep_code(
     """
     import fnmatch  # noqa: PLC0415
     import re as _re_local  # noqa: PLC0415
+
+    # F31: validate path_glob to prevent traversal in glob patterns
+    if path_glob:
+        try:
+            _safe_path(path_glob.replace("*", "x").replace("?", "x"))
+        except ValueError as exc:
+            raise ValueError(f"Invalid path_glob: {exc}") from exc
 
     try:
         rx = _re_local.compile(pattern, 0 if case_sensitive else _re_local.IGNORECASE)

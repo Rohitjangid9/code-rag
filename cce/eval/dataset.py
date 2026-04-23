@@ -32,6 +32,10 @@ class EvalQuery:
 @dataclass
 class EvalDataset:
     queries: list[EvalQuery] = field(default_factory=list)
+    # F-M9: identifies which repo this dataset is valid for.  ``"self"``
+    # means CCE's own repo (core.yaml); ``None`` means repo-agnostic.
+    target_repo: str | None = None
+    name: str = ""
 
     @classmethod
     def from_yaml(cls, path: Path) -> "EvalDataset":
@@ -46,7 +50,11 @@ class EvalDataset:
                 expected_files=q.get("expected_files", []),
                 notes=str(q.get("notes", "")),
             ))
-        return cls(queries=queries)
+        return cls(
+            queries=queries,
+            target_repo=raw.get("target_repo"),
+            name=raw.get("name", path.stem),
+        )
 
     def __len__(self) -> int:
         return len(self.queries)

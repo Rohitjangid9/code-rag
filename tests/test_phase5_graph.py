@@ -142,3 +142,28 @@ def test_full_pipeline_end_to_end(tmp_path):
     )
     assert user is not None
     assert user.name == "User"
+
+
+def test_find_callers_includes_references(tmp_path):
+    """F7: find_callers with include_refs=True counts REFERENCES edges."""
+    pytest.importorskip("jedi")
+    from unittest.mock import patch  # noqa: PLC0415
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import find_callers  # noqa: PLC0415
+
+    src_file = tmp_path / "refs.py"
+    src_file.write_text('def foo():\n    pass\n\nbar = {"x": foo}\nhandler(foo)\n')
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "refs.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(tmp_path, layers=["lexical", "symbols", "graph"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        callers = find_callers("refs.foo", include_refs=True)
+    assert len(callers) == 2

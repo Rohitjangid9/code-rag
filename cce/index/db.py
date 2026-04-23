@@ -29,6 +29,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS lex_fts USING fts5(
     tokenize='porter unicode61'
 );
 
+-- F26: per-symbol / per-50-line-window FTS5 table for high-precision lex search
+CREATE VIRTUAL TABLE IF NOT EXISTS lex_sym_fts USING fts5(
+    path          UNINDEXED,
+    qualified_name UNINDEXED,
+    line_start    UNINDEXED,
+    line_end      UNINDEXED,
+    content,
+    tokenize='porter unicode61'
+);
+
 -- Phase 3: symbol index
 CREATE TABLE IF NOT EXISTS symbols (
     id            TEXT PRIMARY KEY,
@@ -98,6 +108,21 @@ CREATE INDEX IF NOT EXISTS idx_edge_dst  ON edges(dst_id);
 CREATE INDEX IF NOT EXISTS idx_edge_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edge_srcdk ON edges(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_edge_dstdk ON edges(dst_id, kind);
+
+-- F-M13: pending cross-stack API references emitted by the JS/TS resolver that
+-- cannot be resolved to a backend symbol until every file is indexed.  The
+-- API linker consumes this table and rewrites entries as CALLS_API edges.
+CREATE TABLE IF NOT EXISTS api_refs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_id     TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    method     TEXT,
+    file_path  TEXT,
+    line       INTEGER,
+    confidence REAL DEFAULT 0.7
+);
+CREATE INDEX IF NOT EXISTS idx_api_refs_src ON api_refs(src_id);
+CREATE INDEX IF NOT EXISTS idx_api_refs_path ON api_refs(path);
 
 -- Schema version for incremental rebuild detection
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);

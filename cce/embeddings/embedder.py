@@ -9,6 +9,11 @@ openai    | text-embedding-3-large             | 3072 | OPENAI_API_KEY
 openai    | text-embedding-3-small             | 1536 | OPENAI_API_KEY
 jina      | jinaai/jina-embeddings-v2-base-code | 768  | sentence-transformers
 nomic     | nomic-ai/nomic-embed-code          | 3584 | ~7GB VRAM
+
+F36: ``embed_query`` is LRU-cached per distinct text so repeated vector searches
+for the same string skip the API/GPU call.
+
+F37: when ``CCE_OFFLINE=true``, all network calls raise ``RuntimeError``.
 """
 
 from __future__ import annotations
@@ -197,22 +202,66 @@ class NomicEmbedder(Embedder):
         return F.normalize(pooled, p=2, dim=1).cpu().tolist()
 
 
+# ── F36: query-level LRU cache wrapper ───────────────────────────────────────
+
+class _CachedEmbedder(Embedder):
+    """Thin wrapper that caches ``embed_query`` calls via ``functools.lru_cache``.
+
+    The cache is keyed on the query text and lives as long as the embedder
+    instance.  ``embed_documents`` (bulk indexing) is intentionally *not*
+    cached — batch calls are large and should not accumulate in memory.
+    """
+
+    def __init__(self, inner: Embedder, maxsize: int = 512) -> None:
+        import functools  # noqa: PLC0415
+        self._inner = inner
+        self.dim = inner.dim
+        self.backend_name = inner.backend_name
+
+        @functools.lru_cache(maxsize=maxsize)
+        def _cached_query(text: str) -> tuple:
+            return tuple(inner.embed_query(text))
+
+        self._cached_query = _cached_query
+
+    def embed_documents(self, texts) -> list[list[float]]:
+        return self._inner.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return list(self._cached_query(text))
+
+
 # ── Factory ────────────────────────────────────────────────────────────────────
 
 def get_embedder() -> Embedder:
-    """Return the configured embedder. Reads fresh from CCE_EMBED__* env vars."""
+    """Return the configured embedder (cached, offline-guarded).
+
+    F36: wraps with _CachedEmbedder to avoid re-embedding repeated queries.
+    F37: raises RuntimeError when ``CCE_OFFLINE=true``.
+    """
     from cce.config import get_settings  # noqa: PLC0415
-    cfg = get_settings().embedder
+    settings = get_settings()
+
+    # F37: offline guard
+    if settings.offline:
+        raise RuntimeError(
+            "CCE is running in offline mode (CCE_OFFLINE=true). "
+            "Embedding calls are disabled — use lexical search instead."
+        )
+
+    cfg = settings.embedder
     model, dim = _resolve(cfg.backend, cfg.model_name, cfg.dim)
 
     if cfg.backend == "jina":
-        return JinaEmbedder(model_name=model, dim=dim, batch_size=cfg.batch_size)
-    if cfg.backend == "openai":
-        return OpenAIEmbedder(model_name=model, dim=dim)
-    if cfg.backend == "nomic":
-        return NomicEmbedder(model_name=model, dim=dim,
-                             device=cfg.device, dtype=cfg.dtype, max_tokens=cfg.max_tokens)
-    raise ValueError(
-        f"Unknown embedder backend: {cfg.backend!r}. "
-        "Set CCE_EMBED__BACKEND to jina | openai | nomic  (see .env.example)."
-    )
+        inner = JinaEmbedder(model_name=model, dim=dim, batch_size=cfg.batch_size)
+    elif cfg.backend == "openai":
+        inner = OpenAIEmbedder(model_name=model, dim=dim)
+    elif cfg.backend == "nomic":
+        inner = NomicEmbedder(model_name=model, dim=dim,
+                              device=cfg.device, dtype=cfg.dtype, max_tokens=cfg.max_tokens)
+    else:
+        raise ValueError(
+            f"Unknown embedder backend: {cfg.backend!r}. "
+            "Set CCE_EMBED__BACKEND to jina | openai | nomic  (see .env.example)."
+        )
+    return _CachedEmbedder(inner)  # F36

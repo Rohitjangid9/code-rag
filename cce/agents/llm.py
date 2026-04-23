@@ -20,15 +20,20 @@ SYSTEM_PROMPT = """\
 You are Code Context Engine — an expert code analysis assistant.
 You have access to tools that index and query a codebase.
 
+{repo_context}
 Tool-selection playbook (follow this before ranked search):
 - "list / enumerate every X in file Y" → call `list_symbols(file_path=Y, kind=X?)`
+  Example: "list all agent nodes" → `list_symbols(file_path="agents/nodes.py", kind="Function")`
 - "what HTTP endpoints / routes does Z expose" → call `list_routes(framework?)`
+- "what happens when I POST/GET /X" → call `find_route_handler(method="POST", path="/X")`
 - "what CLI commands does this project have" → call `list_cli_commands`
+- When the user says "all / every / every single", pass `limit=500` to `list_*` tools.
 - "what files are in this repo / matching Y" → call `list_files(glob=Y)`
 - "who calls X / where is X used" → call `find_callers(X)` FIRST;
    if it returns nothing, fall back to `grep_code(pattern="\\\\bX\\\\b")`.
 - "show me function X at line N" / "definition of X" → `get_symbol(qname)`
   or `get_file_outline(path)` for all symbols in a file.
+  If the answer needs the function body, call `get_file_slice(path, start, end)` next.
 - Only use `search_code` for fuzzy / conceptual questions ("how does auth
   work", "where is retrieval ranked"). It is ranked top-k and will MISS
   entries — never rely on it for exhaustive lists.
@@ -72,12 +77,20 @@ def _ensure_api_key_loaded() -> None:
             pass
 
 
-@lru_cache(maxsize=1)
-def get_llm() -> BaseChatModel:
-    """Return the configured chat model, cached as a singleton."""
-    cfg = get_settings().agent
+def _build_llm(model: str) -> BaseChatModel:
+    """Instantiate a chat model for the configured provider and *model* name.
+
+    F37: raises ``RuntimeError`` when the engine is in offline mode.
+    """
+    settings = get_settings()
+    if settings.offline:
+        raise RuntimeError(
+            "CCE is running in offline mode (CCE_OFFLINE=true). "
+            "LLM calls are disabled. Use `cce answer` with a local Ollama model "
+            "or disable offline mode."
+        )
+    cfg = settings.agent
     provider = cfg.llm_provider
-    model = cfg.llm_model
     temp = cfg.llm_temperature
 
     if provider == "openai":
@@ -102,10 +115,83 @@ def get_llm() -> BaseChatModel:
     )
 
 
+@lru_cache(maxsize=1)
+def get_llm() -> BaseChatModel:
+    """Return the base chat model (falls back for callers that haven't migrated).
+
+    Prefer :func:`get_planner_llm` / :func:`get_responder_llm` for new code.
+    """
+    cfg = get_settings().agent
+    return _build_llm(cfg.llm_model)
+
+
+@lru_cache(maxsize=1)
+def get_planner_llm() -> BaseChatModel:
+    """Return the LLM used by the planner node (tool-selection loop).
+
+    Resolved from ``AgentSettings.planner_model``; falls back to ``llm_model``.
+    """
+    cfg = get_settings().agent
+    model = cfg.planner_model or cfg.llm_model
+    return _build_llm(model)
+
+
+@lru_cache(maxsize=1)
+def get_responder_llm() -> BaseChatModel:
+    """Return the LLM used by the responder node (final answer synthesis).
+
+    Resolved from ``AgentSettings.responder_model``; falls back to ``llm_model``.
+    """
+    cfg = get_settings().agent
+    model = cfg.responder_model or cfg.llm_model
+    return _build_llm(model)
+
+
+def _build_repo_context() -> str:
+    """F-M8: read .cce/index.json and render a one-paragraph repo summary.
+
+    Returns an empty string when the manifest is missing or unreadable so
+    the prompt still formats cleanly on un-indexed repos.
+    """
+    import json as _json  # noqa: PLC0415
+    settings = get_settings()
+    manifest_path = settings.paths.data_dir / "index.json"
+    if not manifest_path.exists():
+        return ""
+    try:
+        data = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+    root = data.get("root") or str(settings.repo_root or "")
+    frameworks = data.get("frameworks") or []
+    languages = data.get("languages") or []
+    file_count = data.get("file_count", 0)
+    symbol_count = data.get("symbol_count", 0)
+
+    lines = ["Repo context (from index manifest):"]
+    if root:
+        lines.append(f"- root: {root}")
+    if languages:
+        lines.append(f"- languages: {', '.join(languages)}")
+    if frameworks:
+        lines.append(f"- frameworks: {', '.join(frameworks)}")
+    else:
+        lines.append("- frameworks: (none detected)")
+    if file_count:
+        lines.append(f"- files: {file_count}, symbols: {symbol_count}")
+    return "\n".join(lines) + "\n"
+
+
 def get_system_message():
     from langchain_core.messages import SystemMessage  # noqa: PLC0415
     cfg = get_settings().agent
-    return SystemMessage(content=SYSTEM_PROMPT.format(max_loops=cfg.max_retrieval_loops))
+    return SystemMessage(
+        content=SYSTEM_PROMPT.format(
+            max_loops=cfg.max_retrieval_loops,
+            repo_context=_build_repo_context(),
+        )
+    )
 
 
 def get_responder_system_message():

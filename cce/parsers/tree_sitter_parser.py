@@ -19,7 +19,11 @@ from cce.walker import file_to_module_qname
 
 @lru_cache(maxsize=8)
 def _get_language(lang: Language):
-    """Return a tree-sitter Language object, cached per language."""
+    """Return a tree-sitter Language object, cached per language.
+
+    F29: Go, Java, and Rust grammars are loaded lazily and gracefully skipped
+    when the optional tree-sitter-* packages are absent.
+    """
     from tree_sitter import Language as TSLanguage  # noqa: PLC0415
 
     if lang == Language.PYTHON:
@@ -34,6 +38,15 @@ def _get_language(lang: Language):
     if lang == Language.TSX:
         import tree_sitter_typescript as m  # noqa: PLC0415
         return TSLanguage(m.language_tsx())
+    if lang == Language.GO:
+        import tree_sitter_go as m  # noqa: PLC0415
+        return TSLanguage(m.language())
+    if lang == Language.JAVA:
+        import tree_sitter_java as m  # noqa: PLC0415
+        return TSLanguage(m.language())
+    if lang == Language.RUST:
+        import tree_sitter_rust as m  # noqa: PLC0415
+        return TSLanguage(m.language())
     raise ValueError(f"Unsupported language: {lang}")
 
 
@@ -68,10 +81,46 @@ def _first_string_in_body(body_node, src: bytes) -> str | None:
     return None
 
 
+_repo_salt: "ContextVar[str]" = None  # type: ignore[assignment]
+
+
+def set_repo_salt(salt: str) -> "object":
+    """F-M15: set the repo-scoped salt used by :func:`_node_id_from_qname`.
+
+    Returns a token that can be passed to :func:`reset_repo_salt` to restore
+    the previous value — mirroring ``contextvars.ContextVar.set`` semantics.
+    Repeated calls from nested contexts stack correctly.
+    """
+    from contextvars import ContextVar  # noqa: PLC0415
+    global _repo_salt
+    if _repo_salt is None:
+        _repo_salt = ContextVar("cce_repo_salt", default="")
+    return _repo_salt.set(salt or "")
+
+
+def reset_repo_salt(token) -> None:
+    """Restore the salt to the value recorded when ``token`` was issued."""
+    if _repo_salt is not None and token is not None:
+        _repo_salt.reset(token)
+
+
+def _current_salt() -> str:
+    return _repo_salt.get() if _repo_salt is not None else ""
+
+
 def _node_id_from_qname(qname: str) -> str:
-    """Deterministic ID: sha1 prefix of qualified_name so same symbol == same id."""
+    """Deterministic ID: sha1 prefix of ``<repo_salt>:<qname>`` → same symbol == same id.
+
+    F-M15: the salt defaults to the empty string so single-repo deployments
+    produce identical IDs to pre-M15 indexes.  Centralised deployments that
+    index multiple repos into one database set a non-empty salt per repo via
+    :func:`set_repo_salt` so qualified-name collisions don't merge symbols
+    that live in different codebases.
+    """
     import hashlib  # noqa: PLC0415
-    return "sym_" + hashlib.sha1(qname.encode()).hexdigest()[:20]
+    salt = _current_salt()
+    key = f"{salt}:{qname}" if salt else qname
+    return "sym_" + hashlib.sha1(key.encode()).hexdigest()[:20]
 
 
 # ── Python parser ─────────────────────────────────────────────────────────────
@@ -304,6 +353,102 @@ def _classify_js_fn(name: str, fn_node, src: bytes, is_tsx_jsx: bool) -> tuple[N
     return NodeKind.FUNCTION, None
 
 
+# ── F29: generic Go / Java / Rust parser ─────────────────────────────────────
+
+_GO_FUNC_RE = re.compile(r"^func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(", re.MULTILINE)
+_JAVA_METHOD_RE = re.compile(
+    r"(?:public|private|protected|static|final|abstract|synchronized|native|default)?\s+"
+    r"(?:\w+(?:<[^>]*>)?\s+)(\w+)\s*\([^)]*\)\s*(?:throws\s+\w+\s*)?[{;]",
+    re.MULTILINE,
+)
+_RUST_FN_RE = re.compile(r"^(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*[<(]", re.MULTILINE)
+
+
+def _parse_generic(parsed: ParsedFile, src: bytes, root: Path, language: Language) -> None:
+    """Tree-sitter based parser for Go, Java, and Rust (F29).
+
+    Extracts top-level function/method definitions using AST node types common
+    across these languages.  Raises ``ImportError`` when the grammar package is
+    not installed so the caller can fall back to the heuristic regex parser.
+    """
+    from cce.walker import file_to_module_qname  # noqa: PLC0415
+
+    tree = _get_parser(language).parse(src)
+    module_qname = file_to_module_qname(parsed.path, root)
+    source_text = src.decode("utf-8", errors="replace")
+
+    # Node type names that represent function/method definitions per language
+    fn_types: set[str] = {
+        Language.GO:   {"function_declaration", "method_declaration"},
+        Language.JAVA: {"method_declaration", "constructor_declaration"},
+        Language.RUST: {"function_item"},
+    }.get(language, {"function_declaration"})
+
+    kind_map: dict[str, NodeKind] = {
+        "function_declaration": NodeKind.FUNCTION,
+        "method_declaration": NodeKind.METHOD,
+        "constructor_declaration": NodeKind.METHOD,
+        "function_item": NodeKind.FUNCTION,
+    }
+
+    def visit(node) -> None:
+        if node.type in fn_types:
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                fname = _text(name_node, src)
+                line_start = node.start_point[0] + 1
+                line_end = node.end_point[0] + 1
+                qname = f"{module_qname}.{fname}"
+                parsed.nodes.append(Node(
+                    id=_node_id_from_qname(qname),
+                    kind=kind_map.get(node.type, NodeKind.FUNCTION),
+                    qualified_name=qname,
+                    name=fname,
+                    file_path=parsed.rel_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    language=language,
+                ))
+        for child in node.children:
+            visit(child)
+
+    visit(tree.root_node)
+
+
+def _parse_heuristic(parsed: ParsedFile, source: str) -> None:
+    """Regex-based fallback parser used when a tree-sitter grammar isn't installed (F29)."""
+    from cce.walker import file_to_module_qname  # noqa: PLC0415
+
+    lang = parsed.language
+    module_qname = file_to_module_qname(parsed.path, parsed.path.parent)
+    lines = source.splitlines()
+
+    if lang == Language.GO:
+        pattern = _GO_FUNC_RE
+    elif lang == Language.JAVA:
+        pattern = _JAVA_METHOD_RE
+    elif lang == Language.RUST:
+        pattern = _RUST_FN_RE
+    else:
+        return
+
+    for m in pattern.finditer(source):
+        fname = m.group(1)
+        line_start = source[: m.start()].count("\n") + 1
+        line_end = min(line_start + 20, len(lines))
+        qname = f"{module_qname}.{fname}"
+        parsed.nodes.append(Node(
+            id=_node_id_from_qname(qname),
+            kind=NodeKind.FUNCTION,
+            qualified_name=qname,
+            name=fname,
+            file_path=parsed.rel_path,
+            line_start=line_start,
+            line_end=line_end,
+            language=lang,
+        ))
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 class TreeSitterParser:
@@ -319,6 +464,12 @@ class TreeSitterParser:
                 _parse_python(parsed, src, root)
             elif language in (Language.JAVASCRIPT, Language.JSX, Language.TYPESCRIPT, Language.TSX):
                 _parse_js_ts(parsed, src, root)
+            elif language in (Language.GO, Language.JAVA, Language.RUST):
+                # F29: attempt grammar-based parse; fall back to heuristic on ImportError
+                try:
+                    _parse_generic(parsed, src, root, language)
+                except ImportError:
+                    _parse_heuristic(parsed, source)
         except Exception as exc:  # noqa: BLE001
             from cce.logging import get_logger  # noqa: PLC0415
             get_logger(__name__).warning("tree-sitter parse error %s: %s", rel_path, exc)

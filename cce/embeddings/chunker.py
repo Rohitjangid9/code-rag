@@ -11,6 +11,7 @@ Header format (prepended to body so the embedding encodes full context):
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from ulid import ULID
@@ -20,12 +21,46 @@ from cce.logging import get_logger
 
 log = get_logger(__name__)
 
-# ── Token budgets (word-level approximation; 1 word ≈ 1.3 tokens) ─────────────
-# Total budget ≈ 1 500 words  (~1 950 tokens) — fits in 2k context window.
-# Header gets priority; body gets the remainder.
-MAX_HEADER_WORDS: int = 100    # ~130 tokens — enough for 6 metadata lines + docstring
-MAX_BODY_WORDS: int = 1_400    # ~1 820 tokens — main code body
+# ── Token budgets ─────────────────────────────────────────────────────────────
+# F24: use tiktoken when available for token-accurate budgets; fall back to the
+# word-level approximation (1 word ≈ 1.3 tokens) so the code works without it.
+#
+# Total budget ≈ 1 950 tokens — fits in a 2 k context window.
+# Header gets priority (≈130 tokens); body gets the remainder (≈1 820 tokens).
+MAX_HEADER_TOKENS: int = 130
+MAX_BODY_TOKENS: int = 1_820
+MAX_TOTAL_TOKENS: int = MAX_HEADER_TOKENS + MAX_BODY_TOKENS
+
+# Legacy word-based constants (kept so callers that pass max_words= still work)
+MAX_HEADER_WORDS: int = 100
+MAX_BODY_WORDS: int = 1_400
 MAX_TOTAL_WORDS: int = MAX_HEADER_WORDS + MAX_BODY_WORDS
+
+
+# ── F24: tiktoken helpers ─────────────────────────────────────────────────────
+
+_count_tokens_fn = None  # lazy-initialised on first call
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens in *text* using tiktoken when available (F24).
+
+    Initialised lazily on the first call so ``tiktoken`` never downloads its
+    encoding file at import time (which would block the test suite on cold
+    environments with no network access).  Falls back to a word-count
+    approximation (1.3 tokens/word) when tiktoken is not installed.
+    """
+    global _count_tokens_fn  # noqa: PLW0603
+    if _count_tokens_fn is None:
+        try:
+            import tiktoken  # noqa: PLC0415
+            enc = tiktoken.get_encoding("cl100k_base")
+            _count_tokens_fn = lambda t: len(enc.encode(t, disallowed_special=()))  # noqa: E731
+            log.debug("tiktoken loaded for token-accurate chunk budgets")
+        except Exception:  # noqa: BLE001
+            _count_tokens_fn = lambda t: int(len(t.split()) * 1.3)  # noqa: E731
+            log.debug("tiktoken not available — using word-count approximation")
+    return _count_tokens_fn(text)
 
 
 @dataclass
@@ -41,11 +76,19 @@ class Chunk:
     body: str = ""
     header_word_count: int = 0
     body_word_count: int = 0
+    # F21: SHA-256 of (header + body); used to skip re-embed when unchanged
+    content_hash: str = ""
 
     @property
     def token_count(self) -> int:
         """Rough token estimate (1.3 words/token)."""
         return int((self.header_word_count + self.body_word_count) * 1.3)
+
+
+def _chunk_hash(header: str, body: str) -> str:
+    """Return hex SHA-256 of the concatenated header + body (F21)."""
+    content = (header + "\n" + body).encode("utf-8", errors="replace")
+    return hashlib.sha256(content).hexdigest()
 
 
 def build_header(node: Node, max_words: int = MAX_HEADER_WORDS) -> str:
@@ -75,14 +118,24 @@ def build_header(node: Node, max_words: int = MAX_HEADER_WORDS) -> str:
     return "\n".join(base_lines)
 
 
-def _trim_body(body_lines: list[str], max_words: int) -> tuple[str, int, bool]:
-    """Return (trimmed_body, word_count, was_truncated)."""
+def _trim_body(
+    body_lines: list[str],
+    max_words: int = MAX_BODY_WORDS,
+    max_tokens: int = MAX_BODY_TOKENS,
+) -> tuple[str, int, bool]:
+    """Return (trimmed_body, word_count, was_truncated).
+
+    F24: uses tiktoken when available for exact token accounting; the word-count
+    guard acts as a secondary backstop for the legacy ``max_words`` callers.
+    """
     words_seen = 0
+    tokens_seen = 0
     trimmed: list[str] = []
     for line in body_lines:
         trimmed.append(line)
         words_seen += len(line.split())
-        if words_seen >= max_words:
+        tokens_seen += _count_tokens(line)
+        if tokens_seen >= max_tokens or words_seen >= max_words:
             trimmed.append("# … (body truncated to fit token budget)")
             return "\n".join(trimmed), words_seen, True
     return "\n".join(trimmed), words_seen, False
@@ -115,6 +168,7 @@ def chunk_node(node: Node, source_lines: list[str],
         body=body,
         header_word_count=header_wc,
         body_word_count=body_wc,
+        content_hash=_chunk_hash(header, body),  # F21
     )
 
 

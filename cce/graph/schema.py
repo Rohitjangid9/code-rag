@@ -25,6 +25,7 @@ class NodeKind(str, Enum):
     MIDDLEWARE = "Middleware"
     SIGNAL = "Signal"
     URL_PATTERN = "URLPattern"
+    CLI_COMMAND = "CliCommand"
 
 
 class EdgeKind(str, Enum):
@@ -53,6 +54,9 @@ class Language(str, Enum):
     JAVASCRIPT = "javascript"
     TSX = "tsx"
     JSX = "jsx"
+    GO = "go"       # F29
+    JAVA = "java"   # F29
+    RUST = "rust"   # F29
 
 
 class FrameworkTag(str, Enum):

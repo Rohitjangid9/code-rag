@@ -15,6 +15,8 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:  # noqa: BLE001
             pass
 
+import os
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -29,6 +31,24 @@ app = typer.Typer(
 )
 console = Console()
 log = get_logger(__name__)
+
+
+# ── F-M4: global --repo option (auto-detected when unset) ─────────────────────
+
+@app.callback()
+def _global_opts(
+    repo: Path | None = typer.Option(
+        None,
+        "--repo",
+        "-r",
+        help="Path to the indexed repo. Auto-detected by walking up for .cce/ if unset.",
+        file_okay=False,
+        dir_okay=True,
+    ),
+) -> None:
+    """Set CCE_REPO_ROOT so every subcommand binds Settings to the right repo."""
+    if repo is not None:
+        os.environ["CCE_REPO_ROOT"] = str(repo.resolve())
 
 
 # ── Phase 1 ────────────────────────────────────────────────────────────────────
@@ -62,6 +82,16 @@ def index(
         "lexical,symbols,graph,framework",
         help="Comma-separated: lexical, symbols, graph, framework, semantic",
     ),
+    include: str = typer.Option(
+        "",
+        "--include",
+        help="Comma-separated soft-skip dirs to include (e.g. 'migrations,vendor').",
+    ),
+    skip: str = typer.Option(
+        "",
+        "--skip",
+        help="Comma-separated extra dir names to exclude (beyond built-in skips).",
+    ),
 ) -> None:
     """Build index layers for the given codebase root.
 
@@ -69,9 +99,17 @@ def index(
     """
     from cce.indexer import IndexPipeline  # noqa: PLC0415
 
+    # F-M4: anchor the pipeline Settings to the repo being indexed so .cce/
+    # is created inside *path*, not the CWD.
+    settings = get_settings(repo_root=path)
     layer_list = [la.strip() for la in layers.split(",")]
+    include_set = {s.strip() for s in include.split(",") if s.strip()}
+    skip_set = {s.strip() for s in skip.split(",") if s.strip()}
     with console.status(f"Indexing {path} …"):
-        stats = IndexPipeline().run(path, layer_list)
+        stats = IndexPipeline(settings=settings).run(
+            path, layer_list, include_dirs=include_set or None,
+            skip_dirs=skip_set or None,
+        )
     console.print(f"[green]✓[/] {stats.files_new} new, {stats.files_changed} changed, "
                   f"{stats.files_deleted} deleted | [bold]{stats.symbols_indexed}[/] symbols "
                   f"| [bold]{stats.edges_indexed}[/] edges | {stats.elapsed_s:.1f}s")
@@ -330,6 +368,65 @@ def eval(
     console.print(report.rich_table())
 
 
+@app.command(name="eval-agent")
+def eval_agent(
+    path: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+    dataset: Path = typer.Option(
+        None, "--dataset", "-d", exists=False,
+        help="YAML eval query file.  Defaults to cce/eval/datasets/core.yaml.",
+    ),
+    k: int = typer.Option(10, "--k", help="Recall/MRR cutoff."),
+    scorecard: Path = typer.Option(
+        None, "--scorecard", "-s",
+        help="Output path for scorecard.json (F14).  Defaults to .cce/scorecard.json.",
+    ),
+    mrr_threshold: float = typer.Option(0.50, "--mrr", help="MRR CI gate threshold."),
+    recall_threshold: float = typer.Option(0.50, "--recall", help="Recall CI gate threshold."),
+    ndcg_threshold: float = typer.Option(0.50, "--ndcg", help="nDCG CI gate threshold."),
+    fail_on_regression: bool = typer.Option(False, "--fail", "-f", help="Exit 1 if thresholds not met."),
+) -> None:
+    """Run the retrieval eval harness and write a scorecard.json (F14).
+
+    Used as a CI gate — ``--fail`` causes exit code 1 if any threshold is missed.
+
+    \b
+    Examples::
+
+        cce eval-agent /path/to/repo
+        cce eval-agent /path/to/repo --dataset my_queries.yaml --fail
+        cce eval-agent /path/to/repo --mrr 0.7 --recall 0.65 --fail
+    """
+    from cce.eval.harness import EvalHarness as _EvalHarness  # noqa: PLC0415
+    from cce.eval.dataset import EvalDataset as _EvalDataset  # noqa: PLC0415
+
+    # Resolve dataset path
+    if dataset is None:
+        dataset = Path(__file__).parent / "eval" / "datasets" / "core.yaml"
+    if not dataset.exists():
+        console.print(f"[red]Dataset not found: {dataset}[/]")
+        raise typer.Exit(1)
+
+    # Resolve scorecard path
+    cfg = get_settings()
+    scorecard_path = scorecard or (cfg.paths.data_dir / "scorecard.json")
+
+    ds = _EvalDataset.from_yaml(dataset)
+    thresholds = {"mrr": mrr_threshold, "recall": recall_threshold, "ndcg": ndcg_threshold}
+    harness = _EvalHarness(root=path, k=k, thresholds=thresholds)
+    report = harness.run(ds)
+    console.print(report.rich_table())
+
+    passed = report.write_scorecard(
+        scorecard_path, dataset_name=dataset.stem, thresholds=thresholds
+    )
+    console.print(f"[dim]Scorecard → {scorecard_path}[/]")
+
+    if not passed:
+        console.print("[yellow]⚠  One or more CI thresholds not met — see scorecard.[/]")
+        if fail_on_regression:
+            raise typer.Exit(1)
+
+
 def _check_tool_call_support(provider: str, model: str) -> tuple[bool, str]:
     """Return (is_compatible, human_detail) for the configured agent LLM.
 
@@ -501,6 +598,25 @@ def doctor() -> None:
     except Exception as e:  # noqa: BLE001
         _warn("Agent tool-calling", str(e)[:80])
 
+    # F12: Index manifest check
+    try:
+        from cce.config import get_settings as _gs  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+        cfg = _gs()
+        manifest_path = cfg.paths.data_dir / "index.json"
+        if manifest_path.exists():
+            m = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            mver = m.get("schema_version")
+            detail = f"root={m.get('root','?')}  indexed_at={m.get('indexed_at','?')}"
+            if mver != cfg.schema_version:
+                _warn("Index manifest", f"schema_version mismatch (manifest={mver}, expected={cfg.schema_version})")
+            else:
+                _ok("Index manifest", detail)
+        else:
+            _warn("Index manifest", "not found — run `cce index <path>`")
+    except Exception as e:
+        _fail("Index manifest", str(e)[:80])
+
     # Python packages
     for pkg, note in [("watchdog","watcher"), ("ulid","IDs"), ("yaml","eval"),
                       ("langchain_core","LangChain"), ("langgraph","agent graph")]:
@@ -635,6 +751,91 @@ def inspect_qdrant(
         for k, v in sorted(payload.items()):
             pt_tbl.add_row(k, str(v)[:200])
         console.print(pt_tbl)
+
+
+@app.command()
+def answer(
+    query: str = typer.Argument(..., help="Natural-language question about the codebase."),
+    thread_id: str = typer.Option(None, "--thread-id", "-t", help="Resume an existing thread."),
+    max_loops: int = typer.Option(None, "--max-loops", "-n", help="Override max retrieval loops."),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Print full JSON trace after answer."),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON-Lines output (answer + trace)."),
+) -> None:
+    """Ask a question and get a deterministic cited answer from the agent (F23).
+
+    Unlike the interactive ``chat`` command this command prints exactly one
+    answer and exits, making it suitable for scripting and CI pipelines.
+
+    \b
+    Examples::
+
+        cce answer "Where is the login endpoint?"
+        cce answer "List all CLI commands" --json
+        cce answer "Explain the auth flow" --debug --max-loops 4
+    """
+    import json as _json  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+
+    try:
+        from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
+        from cce.agents.graph import build_graph  # noqa: PLC0415
+    except ImportError as e:
+        console.print(f"[red]Agent dependencies missing: {e}[/]")
+        raise typer.Exit(1)
+
+    cfg = get_settings()
+    if max_loops is not None:
+        cfg.agent.max_retrieval_loops = max_loops
+
+    tid = thread_id or str(uuid.uuid4())
+    checkpointer = MemorySaver()
+    graph = build_graph(checkpointer=checkpointer)
+
+    config = {"configurable": {"thread_id": tid}}
+    state = {"query": query, "messages": [], "loop_count": 0,
+             "retrieved_context": [], "reasoning_steps": [], "tool_errors": 0,
+             "coverage_axes": {}}
+
+    if not json_out:
+        console.print(f"\n[bold cyan]Query:[/] {query}")
+        with console.status("[bold green]Thinking…"):
+            final_state = graph.invoke(state, config=config)
+    else:
+        final_state = graph.invoke(state, config=config)
+
+    answer_text = final_state.get("answer", "")
+    citations = final_state.get("citations", [])
+    reasoning = final_state.get("reasoning_steps", [])
+
+    if json_out:
+        output = {
+            "thread_id": tid,
+            "query": query,
+            "answer": answer_text,
+            "citations": citations,
+            "reasoning_steps": reasoning,
+        }
+        print(_json.dumps(output))
+        return
+
+    # Human-readable output
+    console.print()
+    console.rule("[bold green]Answer")
+    console.print(answer_text or "[dim]No answer generated.[/]")
+
+    if citations:
+        console.print()
+        console.rule("[dim]Citations")
+        for c in citations:
+            console.print(f"  [cyan]{c}[/]")
+
+    if debug:
+        console.print()
+        console.rule("[dim]Reasoning trace")
+        for step in reasoning:
+            console.print(f"  [dim]{step}[/]")
+        console.print()
+        console.print(f"[dim]thread_id={tid}  loops={final_state.get('loop_count', 0)}[/]")
 
 
 if __name__ == "__main__":

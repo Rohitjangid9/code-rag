@@ -1,15 +1,25 @@
-"""Phases 1-7 — IndexPipeline: walk → hash → lex → parse → framework-extract → resolve → graph → embed."""
+"""Phases 1-7 — IndexPipeline: walk → hash → lex → parse → framework-extract → resolve → graph → embed.
+
+F28: per-file parsing is executed in a ``ThreadPoolExecutor`` (configurable via
+     ``CCE_INDEXER__WORKERS``).  Pure-computation work (AST parse, framework
+     extract, Jedi resolve) runs in parallel; all store writes are serialised
+     on the main thread to avoid SQLite contention.
+"""
 
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from cce.config import Settings, get_settings
+from cce.extractors.cli_extractor import CLIExtractor
 from cce.extractors.django_extractor import DjangoExtractor
 from cce.extractors.fastapi_extractor import FastAPIExtractor
 from cce.extractors.framework_detector import detect_frameworks, file_belongs_to
+from cce.extractors.langgraph_extractor import LangGraphExtractor
 from cce.extractors.react_extractor import ReactExtractor
 from cce.graph.schema import EdgeKind, FrameworkTag
 from cce.graph.sqlite_store import SQLiteGraphStore
@@ -24,7 +34,30 @@ from cce.walker import WalkedFile, walk_repo
 
 log = get_logger(__name__)
 
-_FRAMEWORK_EXTRACTORS = [DjangoExtractor(), FastAPIExtractor(), ReactExtractor()]
+
+@dataclass
+class _FileParseResult:
+    """Holds everything computed during the pure-parse phase (F28).
+
+    All fields are plain Python data (no store references) so the result can
+    be passed safely from a worker thread to the main thread for serial writes.
+    """
+
+    wf: Any                    # WalkedFile
+    rel: str
+    source: str
+    root: Any = None           # Path — passed through for Jedi resolution
+    nodes: list = field(default_factory=list)         # list[Node]
+    raw_edges: list = field(default_factory=list)     # list[RawEdge]
+    router_prefixes: dict = field(default_factory=dict)
+    sym_bodies: list = field(default_factory=list)    # [(qname, ls, le, body)] for F26
+    error: str | None = None
+
+
+_FRAMEWORK_EXTRACTORS = [
+    DjangoExtractor(), FastAPIExtractor(), ReactExtractor(),
+    CLIExtractor(), LangGraphExtractor(),
+]
 
 
 @dataclass
@@ -50,6 +83,7 @@ class IndexPipeline:
         self._sym: SymbolStore | None = None
         self._graph: SQLiteGraphStore | None = None
         self._parser = TreeSitterParser()
+        self._router_prefixes: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Stores — lazy init
@@ -68,17 +102,55 @@ class IndexPipeline:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, root: Path, layers: list[str] | None = None) -> IndexStats:
-        """Run the full pipeline over *root*. *layers* filters which phases run."""
+    def run(
+        self,
+        root: Path,
+        layers: list[str] | None = None,
+        include_dirs: set[str] | None = None,
+        skip_dirs: set[str] | None = None,
+    ) -> IndexStats:
+        """Run the full pipeline over *root*. *layers* filters which phases run.
+
+        F-M6: ``include_dirs`` un-skips entries from the walker's soft-skip
+        set (e.g. ``{"migrations"}`` to index Django migrations); ``skip_dirs``
+        adds further directory names to ignore.
+        """
         layers = layers or ["lexical", "symbols", "graph", "framework"]
         t0 = time.monotonic()
         self._init_stores()
 
-        stats = IndexStats(root=str(root))
+        # F-M15: scope every ``_node_id_from_qname`` call made during this
+        # pipeline run to the current repo so symbol IDs don't collide with
+        # other repos sharing the same DB (centralised mode).  The salt is the
+        # resolved repo root path — deterministic and unique per codebase.
+        from cce.parsers.tree_sitter_parser import (  # noqa: PLC0415
+            reset_repo_salt, set_repo_salt,
+        )
+        salt = str(Path(root).resolve())
+        salt_token = set_repo_salt(salt)
 
+        try:
+            return self._run_inner(root, layers, include_dirs, skip_dirs, stats=IndexStats(root=str(root)), t0=t0)
+        finally:
+            reset_repo_salt(salt_token)
+
+    def _run_inner(
+        self,
+        root: Path,
+        layers: list[str],
+        include_dirs: set[str] | None,
+        skip_dirs: set[str] | None,
+        stats: IndexStats,
+        t0: float,
+    ) -> IndexStats:
+        """Body of :meth:`run` — factored out so the repo-salt context manager
+        in :meth:`run` wraps every phase in a single ``try/finally``.
+        """
         # Phase 1 — walk + change detection
         log.info("Walking %s …", root)
-        walked: list[WalkedFile] = list(walk_repo(root))
+        walked: list[WalkedFile] = list(
+            walk_repo(root, skip_dirs=skip_dirs, include_dirs=include_dirs)
+        )
         stats.files_total = len(walked)
 
         changes: ChangeSet = detect_changes(walked, self._db, root)  # type: ignore[arg-type]
@@ -89,20 +161,32 @@ class IndexPipeline:
         for rel in changes.deleted:
             delete_file_records(rel, self._db)  # type: ignore[arg-type]
 
-        # Phase 6 — detect frameworks once for the repo
+        # Phase 6 — detect frameworks once for the repo.  F-M10: reuse the
+        # already-walked Python files so detection never descends into
+        # ``node_modules`` / ``.venv`` and uses AST-level import checks.
         active_frameworks: set[FrameworkTag] = set()
         if "framework" in layers:
-            active_frameworks = detect_frameworks(root)
+            py_files = [wf.path for wf in walked if wf.path.suffix == ".py"]
+            active_frameworks = detect_frameworks(root, python_files=py_files)
             if active_frameworks:
                 log.info("Detected frameworks: %s", {f.value for f in active_frameworks})
 
-        for wf in changes.to_index:
-            try:
-                self._index_file(wf, root, layers, stats, active_frameworks)
-            except Exception as exc:  # noqa: BLE001
-                msg = f"error indexing {wf.rel_path}: {exc}"
-                log.warning(msg)
-                stats.errors.append(msg)
+        # F28: parse files in parallel, apply writes serially
+        workers = self._settings.indexer.workers or None  # None = os.cpu_count()
+        self._index_files_parallel(
+            changes.to_index, root, layers, stats, active_frameworks, workers
+        )
+
+        # F4: stamp effective_path on Route nodes using cross-file router prefixes
+        if self._router_prefixes:
+            self._stamp_effective_paths()
+
+        # F-M13: cross-stack linker — resolve pending api_refs into CALLS_API
+        # edges once every backend route is in the symbols table.
+        if "graph" in layers or "framework" in layers:
+            from cce.extractors.api_linker import link_api_references  # noqa: PLC0415
+            created = link_api_references(self._db.conn)  # type: ignore[union-attr]
+            stats.edges_indexed += created
 
         # Phase 7 — semantic embedding
         if "semantic" in layers:
@@ -114,54 +198,202 @@ class IndexPipeline:
             stats.files_new, stats.files_changed, stats.files_deleted,
             stats.symbols_indexed, stats.edges_indexed, stats.elapsed_s,
         )
+        # F12: write index manifest for startup health checks and cce doctor
+        # F-M8: include frameworks and language breakdown so the agent prompt
+        # can surface them without re-walking the repo at query time.
+        languages = sorted({wf.language.value for wf in walked})
+        framework_values = sorted({f.value for f in active_frameworks})
+        self._write_manifest(root, stats, layers, languages, framework_values)
         return stats
 
-    def _index_file(self, wf: WalkedFile, root: Path, layers: list[str],
-                    stats: IndexStats, active_frameworks: set[FrameworkTag] | None = None) -> None:
+    def _write_manifest(
+        self,
+        root: Path,
+        stats: IndexStats,
+        layers: list[str],
+        languages: list[str] | None = None,
+        frameworks: list[str] | None = None,
+    ) -> None:
+        """Write .cce/index.json with key metadata for startup health checks."""
+        import json as _json  # noqa: PLC0415
+        import datetime  # noqa: PLC0415
+        try:
+            commit_sha: str | None = None
+            try:
+                import subprocess as _sp  # noqa: PLC0415
+                r = _sp.run(
+                    ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    commit_sha = r.stdout.strip()
+            except Exception:  # noqa: BLE001
+                pass
+
+            manifest = {
+                "root": str(root),
+                "indexed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "commit_sha": commit_sha,
+                "file_count": stats.files_total,
+                "symbol_count": stats.symbols_indexed,
+                "edge_count": stats.edges_indexed,
+                "languages": languages or [],
+                "frameworks": frameworks or [],
+                "layers": layers,
+                "schema_version": self._settings.schema_version,
+                "db_path": str(self._settings.paths.sqlite_db),
+                "qdrant_path": str(self._settings.paths.qdrant_path),
+            }
+            manifest_path = self._settings.paths.data_dir / "index.json"
+            manifest_path.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
+            log.debug("Wrote index manifest to %s", manifest_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to write index manifest: %s", exc)
+
+    # ── F28: parallel indexing ────────────────────────────────────────────────
+
+    def _index_files_parallel(
+        self,
+        files: list,
+        root: Path,
+        layers: list[str],
+        stats: IndexStats,
+        active_frameworks,
+        workers: int | None,
+    ) -> None:
+        """Parse files in a thread pool; apply writes serially (F28)."""
+        if not files:
+            return
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    self._parse_file_worker, wf, root, layers, active_frameworks
+                ): wf
+                for wf in files
+            }
+            for future in as_completed(futures):
+                wf = futures[future]
+                try:
+                    result = future.result()
+                    self._apply_parsed(result, layers, stats)
+                except Exception as exc:  # noqa: BLE001
+                    msg = f"error indexing {wf.rel_path}: {exc}"
+                    log.warning(msg)
+                    stats.errors.append(msg)
+
+    def _parse_file_worker(
+        self,
+        wf: WalkedFile,
+        root: Path,
+        layers: list[str],
+        active_frameworks,
+    ) -> _FileParseResult:
+        """Pure-computation phase: tree-sitter AST parse + framework extraction (F28).
+
+        Only thread-safe operations run here (tree-sitter, regex, framework
+        extractors).  Jedi reference resolution and all store writes are done
+        serially in ``_apply_parsed`` to avoid race conditions.
+        """
         source = wf.path.read_text(encoding="utf-8", errors="replace")
         rel = str(wf.rel_path)
+        result = _FileParseResult(wf=wf, rel=rel, source=source, root=root)
 
-        # Phase 2 — lexical
-        if "lexical" in layers:
-            self._lex.upsert(rel, source)  # type: ignore[union-attr]
-
-        # Phase 3 — symbol parsing (base AST)
         parsed: ParsedFile | None = None
         if "symbols" in layers or "graph" in layers or "framework" in layers:
             parsed = self._parser.parse(wf.path, rel, wf.language, source)
-            self._sym.delete_for_file(rel)  # type: ignore[union-attr]
-            self._sym.upsert_many(parsed.nodes)  # type: ignore[union-attr]
-            stats.symbols_indexed += len(parsed.nodes)
+            result.nodes.extend(parsed.nodes)
+            # F26: collect per-symbol bodies for lexical store
+            if "lexical" in layers:
+                src_lines = source.splitlines()
+                for node in parsed.nodes:
+                    if node.line_start and node.line_end and node.line_end > node.line_start:
+                        body = "\n".join(src_lines[node.line_start - 1: node.line_end])
+                        result.sym_bodies.append(
+                            (node.qualified_name, node.line_start, node.line_end, body)
+                        )
 
-        # Phase 6 — framework extraction (augments nodes + raw_edges)
         if "framework" in layers and parsed is not None and active_frameworks:
-            relevant = file_belongs_to(wf.path, source, active_frameworks)
             for extractor in _FRAMEWORK_EXTRACTORS:
                 if extractor.can_handle(wf.path, source):
                     fw_data = extractor.extract(wf.path, rel, source)
-                    self._sym.upsert_many(fw_data.nodes)
-                    stats.symbols_indexed += len(fw_data.nodes)
-                    if parsed:
-                        parsed.raw_edges.extend(fw_data.raw_edges)
+                    result.nodes.extend(fw_data.nodes)
+                    result.router_prefixes.update(fw_data.router_prefixes)
+                    parsed.raw_edges.extend(fw_data.raw_edges)
 
-        # Phase 4/5 — reference resolution → edges
         if "graph" in layers and parsed is not None:
-            raw_edges = list(parsed.raw_edges)
-            raw_edges += self._resolve_references(parsed, root)
+            # Store raw_edges from AST (no Jedi — that runs serially in _apply_parsed)
+            result.raw_edges.extend(parsed.raw_edges)
+            result._parsed = parsed  # stash ParsedFile for _apply_parsed  # noqa: SLF001
 
-            self._graph.delete_for_file(rel)  # type: ignore[union-attr]
-            for re_ in raw_edges:
-                dst_id = self._graph.resolve_qname(re_.dst_qualified_name)  # type: ignore[union-attr]
-                if dst_id:
-                    self._graph.upsert_edge(  # type: ignore[union-attr]
-                        src_id=re_.src_id,
-                        dst_id=dst_id,
-                        kind=re_.kind,
-                        file_path=re_.file_path,
-                        line=re_.line,
-                        confidence=re_.confidence,
-                    )
-                    stats.edges_indexed += 1
+        return result
+
+    def _apply_parsed(self, result: _FileParseResult, layers: list[str], stats: IndexStats) -> None:
+        """Serialised write phase: Jedi resolve + store writes (F28).
+
+        All non-thread-safe operations (Jedi, SQLite writes) happen here on the
+        main thread after the parallel parse workers have finished.
+        """
+        rel = result.rel
+        source = result.source
+        parsed: ParsedFile | None = getattr(result, "_parsed", None)
+
+        # Phase 2 — lexical (file-level)
+        if "lexical" in layers:
+            self._lex.upsert(rel, source)  # type: ignore[union-attr]
+            for qname, ls, le, body in result.sym_bodies:
+                self._lex.upsert_symbol(rel, qname, ls, le, body)  # type: ignore[union-attr]
+
+        # Phase 3 — symbol store
+        if result.nodes:
+            self._sym.delete_for_file(rel)  # type: ignore[union-attr]
+            self._sym.upsert_many(result.nodes)  # type: ignore[union-attr]
+            stats.symbols_indexed += len(result.nodes)
+
+        # Router prefixes (framework extractor)
+        self._router_prefixes.update(result.router_prefixes)
+
+        # Phase 4/5 — Jedi resolution + graph edges (serial — Jedi is not thread-safe)
+        if "graph" in layers and parsed is not None:
+            raw_edges = list(result.raw_edges)
+            raw_edges += self._resolve_references(parsed, root=result.root)
+            if raw_edges:
+                self._graph.delete_for_file(rel)  # type: ignore[union-attr]
+                # F-M13: purge any previous API refs recorded for this file so
+                # re-indexing cannot leak stale entries into the linker.
+                self._db.conn.execute(  # type: ignore[union-attr]
+                    "DELETE FROM api_refs WHERE file_path = ?", (rel,),
+                )
+                for re_ in raw_edges:
+                    # F-M13: defer unresolvable ``api:/path`` REFERENCES to the
+                    # API linker post-pass (they cannot resolve during parsing
+                    # because backend routes may not yet be indexed).
+                    if re_.dst_qualified_name.startswith("api:"):
+                        self._db.conn.execute(  # type: ignore[union-attr]
+                            "INSERT INTO api_refs "
+                            "(src_id, path, method, file_path, line, confidence) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                re_.src_id,
+                                re_.dst_qualified_name.removeprefix("api:"),
+                                None,
+                                re_.file_path,
+                                re_.line,
+                                re_.confidence,
+                            ),
+                        )
+                        continue
+                    dst_id = self._graph.resolve_qname(re_.dst_qualified_name)  # type: ignore[union-attr]
+                    if dst_id:
+                        self._graph.upsert_edge(  # type: ignore[union-attr]
+                            src_id=re_.src_id,
+                            dst_id=dst_id,
+                            kind=re_.kind,
+                            file_path=re_.file_path,
+                            line=re_.line,
+                            confidence=re_.confidence,
+                        )
+                        stats.edges_indexed += 1
 
     # ── Phase 7 — semantic embedding ──────────────────────────────────────────
 
@@ -200,13 +432,59 @@ class IndexPipeline:
         if not chunks:
             return
 
+        # F22: delete stale vectors for files in the change set before upserting
+        changed_node_ids = [c.node_id for c in chunks]
+        if changed_node_ids:
+            vstore.delete_for_node_ids(collection, changed_node_ids)
+            log.debug("Deleted stale vectors for %d nodes", len(changed_node_ids))
+
+        # F21: fetch existing content hashes; skip chunks whose content is unchanged
+        existing_hashes = vstore.get_existing_hashes(collection, changed_node_ids)
+        chunks_to_embed = [
+            c for c in chunks
+            if existing_hashes.get(c.node_id) != c.content_hash
+        ]
+        skipped = len(chunks) - len(chunks_to_embed)
+        if skipped:
+            log.info("Skipped %d unchanged chunks (F21 hash-dedup)", skipped)
+
         batch_size = cfg.embedder.batch_size
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i: i + batch_size]
+        for i in range(0, len(chunks_to_embed), batch_size):
+            batch = chunks_to_embed[i: i + batch_size]
             texts = [c.header + "\n" + c.body for c in batch]
             vectors = embedder.embed_documents(texts)
             vstore.upsert(collection, list(zip(batch, vectors)))
-            log.info("Embedded %d/%d chunks", min(i + batch_size, len(chunks)), len(chunks))
+            log.info("Embedded %d/%d chunks", min(i + batch_size, len(chunks_to_embed)), len(chunks_to_embed))
+
+    def _stamp_effective_paths(self) -> None:
+        """After framework extraction, prepend cross-file include_router prefixes."""
+        import json as _json  # noqa: PLC0415
+        from cce.extractors.fastapi_extractor import _join_paths  # noqa: PLC0415
+
+        conn = self._db.conn  # type: ignore[union-attr]
+        rows = conn.execute(
+            "SELECT id, meta FROM symbols WHERE kind = 'Route'"
+        ).fetchall()
+
+        for row in rows:
+            meta = _json.loads(row["meta"] or "{}")
+            router_var = meta.get("router_var", "")
+            router_module = meta.get("router_module", "")
+            path = meta.get("path", "")
+            effective_path = path
+            # Apply only cross-file prefixes (same-file prefixes are already baked into path).
+            for prefix_key, prefix in self._router_prefixes.items():
+                mod, var = prefix_key.rsplit(".", 1)
+                if var == router_var and mod != router_module:
+                    effective_path = _join_paths(prefix, effective_path)
+                    break
+            if effective_path != path:
+                meta["effective_path"] = effective_path
+                conn.execute(
+                    "UPDATE symbols SET meta = ? WHERE id = ?",
+                    (_json.dumps(meta), row["id"]),
+                )
+        conn.commit()
 
     def _resolve_references(self, parsed: ParsedFile, root: Path):
         from cce.graph.schema import Language  # noqa: PLC0415

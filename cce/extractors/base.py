@@ -15,6 +15,7 @@ class ExtractedData:
     """Nodes + raw edges produced by a framework extractor for one file."""
     nodes: list[Node] = field(default_factory=list)
     raw_edges: list[RawEdge] = field(default_factory=list)
+    router_prefixes: dict[str, str] = field(default_factory=dict)
 
 
 class FrameworkExtractor(Protocol):

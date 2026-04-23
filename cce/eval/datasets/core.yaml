@@ -1,0 +1,86 @@
+# F14 — Core golden eval dataset for the CCE retrieval CI gate.
+#
+# Each query must have at least one expected_symbol or expected_file.
+# Thresholds are asserted by `cce eval-agent --fail`.
+#
+# F-M9: ``target_repo: self`` marks this file as valid ONLY against CCE's
+# own repo.  Running it against a different codebase will produce zero hits
+# because the expected_symbols reference CCE-internal qualified names.  Use
+# ``cce eval-agent --mode generic`` for repo-agnostic sanity checks.
+
+name: core
+target_repo: self
+queries:
+
+  - id: indexer_run
+    query: "How does the IndexPipeline.run method work?"
+    expected_symbols:
+      - "cce.indexer.IndexPipeline.run"
+    expected_files:
+      - "cce/indexer.py"
+    notes: "Core indexing entry point — must be top-3."
+
+  - id: hybrid_retrieval
+    query: "How is hybrid retrieval implemented?"
+    expected_symbols:
+      - "cce.retrieval.hybrid.HybridRetriever.retrieve"
+    expected_files:
+      - "cce/retrieval/hybrid.py"
+    notes: "RRF + BM25 + vector pipeline."
+
+  - id: agent_planner
+    query: "What does the planner node do in the LangGraph agent?"
+    expected_symbols:
+      - "cce.agents.nodes.planner_node"
+    expected_files:
+      - "cce/agents/nodes.py"
+    notes: "LLM loop entry point."
+
+  - id: responder_node
+    query: "How does the agent generate its final answer?"
+    expected_symbols:
+      - "cce.agents.nodes.responder_node"
+    expected_files:
+      - "cce/agents/nodes.py"
+
+  - id: cli_index_command
+    query: "How do I index a codebase using the CLI?"
+    expected_symbols:
+      - "cce.cli.index"
+    expected_files:
+      - "cce/cli.py"
+
+  - id: vector_store_upsert
+    query: "How are embeddings stored in Qdrant?"
+    expected_symbols:
+      - "cce.index.vector_store.VectorStore.upsert"
+    expected_files:
+      - "cce/index/vector_store.py"
+
+  - id: chunk_node
+    query: "How is a symbol chunked for embedding?"
+    expected_symbols:
+      - "cce.embeddings.chunker.chunk_node"
+    expected_files:
+      - "cce/embeddings/chunker.py"
+
+  - id: walk_repo
+    query: "How does the file walker discover source files?"
+    expected_symbols:
+      - "cce.walker.walk_repo"
+    expected_files:
+      - "cce/walker.py"
+
+  - id: fastapi_routes
+    query: "How are FastAPI routes extracted?"
+    expected_symbols:
+      - "cce.extractors.fastapi_extractor.FastAPIExtractor.extract"
+    expected_files:
+      - "cce/extractors/fastapi_extractor.py"
+
+  - id: jedi_resolver
+    query: "How is Jedi used for Python reference resolution?"
+    expected_symbols:
+      - "cce.parsers.python_resolver.resolve_python_file"
+    expected_files:
+      - "cce/parsers/python_resolver.py"

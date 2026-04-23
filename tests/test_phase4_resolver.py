@@ -99,3 +99,16 @@ def test_confidence_below_1_for_heuristics(parser):
     pf = _parse(parser, tsx_path, FIXTURES / "sample_react", Language.TSX)
     edges = resolve_js_file(pf, FIXTURES / "sample_react")
     assert all(e.confidence < 1.0 for e in edges)
+
+
+def test_python_references_edges(parser, tmp_path):
+    """F6: identifiers as dict values or call arguments emit REFERENCES edges."""
+    pytest.importorskip("jedi")
+    from cce.parsers.python_resolver import resolve_python_file  # noqa: PLC0415
+
+    src_file = tmp_path / "refs.py"
+    src_file.write_text('def foo():\n    pass\n\nbar = {"x": foo}\nhandler(foo)\n')
+    pf = parser.parse(src_file, "refs.py", Language.PYTHON, src_file.read_text())
+    edges = resolve_python_file(pf, tmp_path)
+    ref_edges = [e for e in edges if e.kind == EdgeKind.REFERENCES and "foo" in e.dst_qualified_name]
+    assert len(ref_edges) == 2

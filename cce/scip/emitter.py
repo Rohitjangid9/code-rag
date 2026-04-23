@@ -2,6 +2,10 @@
 
 Walks all indexed symbols and edges, converts them to SCIP documents/occurrences,
 and returns a SCIPIndex ready for JSON serialisation.
+
+F38: REFERENCES edges are now emitted as both a SCIP relationship (on the
+     source symbol) and as ``SymbolRole.READ_ACCESS`` occurrences in the
+     target file, so indexers like Sourcegraph see incoming references.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ _EDGE_TO_RELATIONSHIP = {
     EdgeKind.CALLS: "is_reference",
     EdgeKind.RENDERS: "is_reference",
     EdgeKind.USES_MODEL: "is_type_definition",
+    EdgeKind.REFERENCES: "is_reference",  # F38: explicit REFERENCES edges
 }
 
 
@@ -108,6 +113,9 @@ class SCIPEmitter:
                     relationships=relationships,
                 ))
 
+                # F38: emit READ_ACCESS occurrences for all incoming REFERENCES edges
+                self._emit_reference_occurrences(node, doc)
+
             index.documents.append(doc)
             log.debug("SCIP: emitted %s (%d symbols)", rel_path, len(nodes))
 
@@ -115,6 +123,28 @@ class SCIPEmitter:
                  len(index.documents),
                  sum(len(d.symbols) for d in index.documents))
         return index
+
+    def _emit_reference_occurrences(self, node: Node, doc: SCIPDocument) -> None:
+        """Emit READ_ACCESS occurrences for all nodes that *reference* this node (F38).
+
+        This populates the ``occurrences`` array so cross-reference viewers
+        (Sourcegraph, IntelliJ SCIP plugin) can show inbound references.
+        """
+        scip_sym = _scip_symbol(node)
+        try:
+            # find_callers returns nodes whose CALLS edge points here
+            callers = self._graph.find_callers(node.id)
+        except Exception:  # noqa: BLE001
+            callers = []
+        for caller in callers:
+            if not caller.line_start:
+                continue
+            ref_pos = SCIPPosition(start_line=max(0, caller.line_start - 1))
+            doc.occurrences.append(SCIPOccurrence(
+                range=ref_pos.as_list(),
+                symbol=scip_sym,
+                symbol_roles=SymbolRole.READ_ACCESS,
+            ))
 
     def _build_relationships(self, node: Node) -> list[SCIPRelationship]:
         """Translate outgoing graph edges to SCIP relationships."""

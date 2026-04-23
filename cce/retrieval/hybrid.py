@@ -1,19 +1,22 @@
 """Phase 8 — Hybrid Retriever: Symbol BM25 + Vector + RRF + Graph Expansion.
 
-Pipeline (no reranker in v1):
-  1. Symbol FTS BM25 (top 50)   — name/qname/docstring/signature
-  2. File-content BM25 (top 30) → expand to symbols (top 3 per file)
-  3. Vector cosine (top 50)     — Qdrant, graceful fallback
-  4. Reciprocal Rank Fusion (k=60) over node-id space
-  5. Graph-expand top 15 via CALLS/INHERITS/ROUTES_TO/RENDERS (1 hop)
-  6. Deduplicate + return top k with provenance labels
+Pipeline (F19: synonym expansion; F20: optional cross-encoder reranker; F25: MMR):
+  1. F19: Expand query via synonym map (auth ↔ authenticate/oauth/jwt …)
+  2. Symbol FTS BM25 (top 50)   — name/qname/docstring/signature
+  3. File-content BM25 (top 30) → expand to symbols (top 3 per file)
+  4. Vector cosine (top 50)     — Qdrant, graceful fallback
+  5. Reciprocal Rank Fusion (k=60) over node-id space
+  6. Graph-expand top 15 via CALLS/INHERITS/ROUTES_TO/RENDERS (1 hop)
+  7. F20: Optional cross-encoder reranker (top 50 candidates, CCE_RETRIEVAL__RERANK=true)
+  8. F25: MMR diversity (λ=0.6) over top 2·k candidates
+  9. Deduplicate + return top k with provenance labels
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cce.embeddings.chunker import build_header
 from cce.graph.schema import EdgeKind, Node
@@ -29,6 +32,47 @@ log = get_logger(__name__)
 
 _EXPAND_EDGE_KINDS = [EdgeKind.CALLS, EdgeKind.INHERITS, EdgeKind.ROUTES_TO, EdgeKind.RENDERS]
 
+# ── F19: synonym map ─────────────────────────────────────────────────────────
+# Keys are query tokens; values are additional tokens to OR into the query.
+_SYNONYMS: dict[str, list[str]] = {
+    "auth":         ["authenticate", "authorization", "authorize", "oauth", "jwt",
+                     "session", "bearer", "login", "token", "credential"],
+    "authenticate": ["auth", "login", "oauth", "jwt", "bearer"],
+    "authorize":    ["auth", "permission", "rbac", "acl", "role"],
+    "db":           ["database", "sql", "sqlite", "postgres", "postgresql", "orm",
+                     "repository", "model", "schema"],
+    "database":     ["db", "sql", "sqlite", "postgres", "orm"],
+    "api":          ["endpoint", "route", "handler", "view", "controller"],
+    "route":        ["endpoint", "url", "path", "handler", "view"],
+    "config":       ["settings", "configuration", "env", "environment"],
+    "settings":     ["config", "configuration", "env"],
+    "log":          ["logging", "logger", "trace"],
+    "logging":      ["log", "logger", "trace"],
+    "error":        ["exception", "raise", "traceback", "failure"],
+    "test":         ["spec", "unit", "pytest", "assert"],
+    "cache":        ["redis", "memcache", "lru", "ttl"],
+    "embed":        ["embedding", "vector", "encode", "qdrant"],
+    "search":       ["retrieval", "query", "bm25", "fts", "semantic"],
+}
+
+
+def _expand_query(query: str) -> str:
+    """Expand query tokens using the synonym map (F19).
+
+    Appends synonyms as OR-joined tokens to the original query so BM25 hits
+    on semantically related tokens.  Only expands when the token is an exact
+    key in the synonym map (case-insensitive).
+    """
+    tokens = [t.lower() for t in query.split() if len(t) > 1]
+    extra: list[str] = []
+    for token in tokens:
+        for syn in _SYNONYMS.get(token, []):
+            if syn not in tokens and syn not in extra:
+                extra.append(syn)
+    if not extra:
+        return query
+    return query + " " + " ".join(extra)
+
 
 @dataclass
 class HybridResult:
@@ -41,6 +85,49 @@ class HybridResult:
     rrf_score: float
     provenance: list[str] = field(default_factory=list)   # ["lex", "vec", "graph"]
     chunk_header: str = ""
+
+
+def _mmr(
+    candidates: list["HybridResult"],
+    k: int,
+    lam: float = 0.6,
+) -> list["HybridResult"]:
+    """Maximal Marginal Relevance diversity filter (F25).
+
+    Re-ranks *candidates* by balancing relevance (rrf_score) with diversity
+    (cosine distance between chunk headers).  Returns top-*k* diverse results.
+    λ=1.0 → pure relevance; λ=0.0 → pure diversity.
+    """
+    if len(candidates) <= k:
+        return candidates
+
+    # Simple token-overlap similarity (no heavy embedding dependency)
+    def _sim(a: "HybridResult", b: "HybridResult") -> float:
+        ta = set(a.snippet.lower().split())
+        tb = set(b.snippet.lower().split())
+        if not ta or not tb:
+            return 0.0
+        return len(ta & tb) / len(ta | tb)
+
+    selected: list["HybridResult"] = []
+    remaining = list(candidates)
+
+    while remaining and len(selected) < k:
+        if not selected:
+            # Bootstrap: pick the highest-scoring candidate
+            best = max(remaining, key=lambda r: r.rrf_score)
+        else:
+            best = max(
+                remaining,
+                key=lambda r: (
+                    lam * r.rrf_score
+                    - (1.0 - lam) * max(_sim(r, s) for s in selected)
+                ),
+            )
+        selected.append(best)
+        remaining.remove(best)
+
+    return selected
 
 
 def _rrf_merge(rankings: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
@@ -73,17 +160,23 @@ class HybridRetriever:
 
     def retrieve(self, query: str, k: int = 10, filters: dict | None = None) -> list[HybridResult]:
         """Run hybrid retrieval and return top-k results."""
-        # 1. Symbol FTS BM25
-        sym_hits = self._sym.search(query, k=50)
+        from cce.config import get_settings  # noqa: PLC0415
+        cfg = get_settings().retrieval
+
+        # 1. F19: synonym expansion
+        expanded_query = _expand_query(query) if cfg.synonym_expansion else query
+
+        # 2. Symbol FTS BM25
+        sym_hits = self._sym.search(expanded_query, k=50)
         sym_ranking = [h.node.id for h in sym_hits]
 
-        # 2. File-content BM25 → expand to symbol ids
-        lex_ranking = self._lex_to_symbol_ids(query, k=30)
+        # 3. File-content BM25 → expand to symbol ids
+        lex_ranking = self._lex_to_symbol_ids(expanded_query, k=30)
 
-        # 3. Vector (graceful fallback)
+        # 4. Vector (graceful fallback) — use original query for better semantic match
         vec_ranking = self._vector_search(query, k=50, filters=filters)
 
-        # 4. RRF merge
+        # 5. RRF merge
         rankings = [r for r in [sym_ranking, lex_ranking, vec_ranking] if r]
         if not rankings:
             return []
@@ -91,10 +184,9 @@ class HybridRetriever:
 
         # Build provenance sets for top results
         sym_set = set(sym_ranking)
-        lex_set = set(lex_ranking)
         vec_set = set(vec_ranking)
 
-        # 5. Hydrate top (k + expansion headroom)
+        # 6. Hydrate top (k + expansion headroom)
         results: dict[str, HybridResult] = {}
         for node_id, score in merged:
             node = self._graph.get_node(node_id)
@@ -115,19 +207,56 @@ class HybridRetriever:
                 chunk_header=build_header(node),
             )
 
-        # 6. Graph expand top 15
+        # 7. Graph expand top 15
         top15 = [nid for nid, _ in merged[:15]]
         self._graph_expand(top15, results)
 
-        # 7. Deduplicate, sort, return top k
+        # 8. Deduplicate, sort
         seen: set[str] = set()
-        final: list[HybridResult] = []
+        candidates: list[HybridResult] = []
         for r in sorted(results.values(), key=lambda r: -r.rrf_score):
             dedup_key = (r.path, r.line_start)
             if dedup_key not in seen:
                 seen.add(dedup_key)
-                final.append(r)
-        return final[:k]
+                candidates.append(r)
+
+        # 9. F20: optional cross-encoder reranker
+        if cfg.rerank and len(candidates) > k:
+            candidates = self._rerank(query, candidates, cfg)
+
+        # 10. F25: MMR diversity filter
+        final = _mmr(candidates[: k * 2], k=k)
+        return final
+
+    # ── F20: cross-encoder reranker ───────────────────────────────────────────
+
+    def _rerank(
+        self, query: str, candidates: list[HybridResult], cfg: "Any",
+    ) -> list[HybridResult]:
+        """Re-rank candidates using a cross-encoder model (F20).
+
+        Requires ``sentence-transformers``.  Falls back silently to the
+        original ranking if the package is unavailable.
+        """
+        try:
+            from sentence_transformers import CrossEncoder  # noqa: PLC0415
+        except ImportError:
+            log.debug("cross-encoder reranker requested but sentence-transformers not installed; skipping")
+            return candidates
+
+        top = candidates[: cfg.rerank_top_n]
+        pairs = [(query, r.snippet or r.chunk_header or "") for r in top]
+        try:
+            model = CrossEncoder(cfg.rerank_model)
+            scores = model.predict(pairs)
+            reranked = sorted(zip(top, scores), key=lambda t: -t[1])
+            top_reranked = [r for r, _ in reranked]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Cross-encoder reranker failed: %s — using original order", exc)
+            top_reranked = top
+
+        # Append any candidates beyond rerank_top_n unchanged
+        return top_reranked + candidates[cfg.rerank_top_n:]
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
@@ -151,7 +280,13 @@ class HybridRetriever:
             if self._embedder is None:
                 from cce.embeddings.embedder import get_embedder  # noqa: PLC0415
                 self._embedder = get_embedder()
-            collection = self._vstore.collection_name_from_db(self._settings.paths.sqlite_db)
+            # F-M3: derive collection from repo root (single source of truth
+            # shared with the indexer).  Fall back to data_dir.parent when no
+            # explicit root is bound — matches the ``<root>/.cce`` convention.
+            root = self._settings.repo_root
+            if root is None:
+                root = self._settings.paths.data_dir.resolve().parent
+            collection = self._vstore.collection_name(root)
             if not self._vstore.collection_exists(collection):
                 return []
             query_vec = self._embedder.embed_query(query)

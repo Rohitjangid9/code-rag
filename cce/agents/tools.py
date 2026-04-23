@@ -33,9 +33,22 @@ def get_file_outline(path: str) -> list[dict]:
 
 
 @tool
-def find_callers(qualified_name: str) -> list[dict]:
-    """Return all symbols that call the given symbol."""
-    return [n.model_dump() for n in rt.find_callers(qualified_name)]
+def get_file_slice(path: str, start: int, end: int) -> dict:
+    """Read a slice of lines from an indexed file.
+
+    Use this after ``get_symbol`` when the question needs the function body.
+    """
+    return rt.get_file_slice(path, start, end)
+
+
+@tool
+def find_callers(qualified_name: str, include_refs: bool = True) -> list[dict]:
+    """Return all symbols that call the given symbol.
+
+    Set include_refs=True (default) to also count identifiers passed as
+    arguments, decorators, and dict/list values (EdgeKind.REFERENCES).
+    """
+    return [n.model_dump() for n in rt.find_callers(qualified_name, include_refs=include_refs)]
 
 
 @tool
@@ -48,6 +61,15 @@ def find_references(qualified_name: str) -> list[dict]:
 def get_neighborhood(qualified_name: str, depth: int = 2) -> dict:
     """Return an N-hop subgraph around the given symbol."""
     return rt.get_neighborhood(qualified_name, depth=depth).model_dump()
+
+
+@tool
+def find_route_handler(method: str, path: str) -> dict:
+    """Resolve an HTTP method + path to the exact route handler (FastAPI/Django).
+
+    Use this for "what happens when I POST /X" questions.
+    """
+    return rt.find_route_handler(method, path).model_dump()
 
 
 @tool
@@ -91,14 +113,14 @@ def list_symbols(
 
 
 @tool
-def list_routes(framework: str | None = None) -> list[dict]:
+def list_routes(framework: str | None = None, limit: int = 200) -> list[dict]:
     """List every HTTP route/URL pattern discovered by the framework extractors.
 
     Optional framework filter: "fastapi" | "django" | "drf". Prefer this over
     search_code when asked "what endpoints does X expose" — it returns every
     route, not just the top-ranked few.
     """
-    return [r.model_dump() for r in rt.list_routes(framework=framework)]
+    return [r.model_dump() for r in rt.list_routes(framework=framework, limit=limit)]
 
 
 @tool
@@ -108,9 +130,9 @@ def list_files(glob: str | None = None, limit: int = 2000) -> list[str]:
 
 
 @tool
-def list_cli_commands() -> list[dict]:
+def list_cli_commands(limit: int = 200) -> list[dict]:
     """List Typer/Click CLI commands (functions defined in cli.py / __main__.py)."""
-    return [n.model_dump() for n in rt.list_cli_commands()]
+    return [n.model_dump() for n in rt.list_cli_commands(limit=limit)]
 
 
 @tool
@@ -135,9 +157,11 @@ ALL_TOOLS = [
     search_code,
     get_symbol,
     get_file_outline,
+    get_file_slice,
     find_callers,
     find_references,
     get_neighborhood,
+    find_route_handler,
     get_route,
     get_component_tree,
     get_api_flow,

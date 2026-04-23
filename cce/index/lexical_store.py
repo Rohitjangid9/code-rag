@@ -1,4 +1,10 @@
-"""Phase 2 — Layer 1 lexical search via SQLite FTS5."""
+"""Phase 2 — Layer 1 lexical search via SQLite FTS5.
+
+F26: lex_sym_fts provides per-symbol / 50-line-window indexing alongside the
+file-level lex_fts table.  Both tables coexist; search() queries lex_fts for
+broad file-level BM25 matching while search_symbols() queries lex_sym_fts for
+high-precision symbol-scoped matches.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,9 @@ class LexHit:
     path: str
     snippet: str
     rank: float
+    qualified_name: str = ""
+    line_start: int = 0
+    line_end: int = 0
 
 
 class LexicalStore:
@@ -33,10 +42,87 @@ class LexicalStore:
         conn.execute("INSERT INTO lex_fts(path, content) VALUES (?, ?)", (rel_path, content))
         conn.commit()
 
+    def upsert_symbol(
+        self,
+        rel_path: str,
+        qualified_name: str,
+        line_start: int,
+        line_end: int,
+        content: str,
+    ) -> None:
+        """Upsert one FTS5 row for a single symbol body (F26).
+
+        Also emits one row per 50-line window so that large symbol bodies are
+        chunked into discoverable windows rather than one giant entry.
+        """
+        conn = self._db.conn
+        # Remove old rows for this qualified_name
+        conn.execute(
+            "DELETE FROM lex_sym_fts WHERE qualified_name = ?", (qualified_name,)
+        )
+        lines = content.splitlines()
+        window = 50
+        if len(lines) <= window:
+            conn.execute(
+                "INSERT INTO lex_sym_fts(path, qualified_name, line_start, line_end, content)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (rel_path, qualified_name, line_start, line_end, content),
+            )
+        else:
+            for start_idx in range(0, len(lines), window):
+                chunk_lines = lines[start_idx: start_idx + window]
+                chunk_content = "\n".join(chunk_lines)
+                chunk_line_start = line_start + start_idx
+                chunk_line_end = min(line_start + start_idx + window - 1, line_end)
+                conn.execute(
+                    "INSERT INTO lex_sym_fts(path, qualified_name, line_start, line_end, content)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (rel_path, qualified_name, chunk_line_start, chunk_line_end, chunk_content),
+                )
+        conn.commit()
+
     def delete(self, rel_path: str) -> None:
         conn = self._db.conn
         conn.execute("DELETE FROM lex_fts WHERE path = ?", (rel_path,))
+        conn.execute("DELETE FROM lex_sym_fts WHERE path = ?", (rel_path,))
         conn.commit()
+
+    def search_symbols(self, query: str, k: int = 20) -> list[LexHit]:
+        """BM25-ranked search over the per-symbol lex_sym_fts table (F26)."""
+        tokens = re.findall(r"[\w*]+", query)
+        tokens = [t for t in tokens if len(t) > 1 or "*" in t]
+        if not tokens:
+            return []
+        safe = " OR ".join(tokens) if len(tokens) > 1 else tokens[0]
+        conn = self._db.conn
+        try:
+            rows = conn.execute(
+                """
+                SELECT path, qualified_name,
+                       CAST(line_start AS INTEGER) AS line_start,
+                       CAST(line_end AS INTEGER) AS line_end,
+                       snippet(lex_sym_fts, 4, '[', ']', '…', 8) AS snippet,
+                       rank
+                FROM lex_sym_fts
+                WHERE content MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (safe, k),
+            ).fetchall()
+        except Exception:  # noqa: BLE001
+            return []
+        return [
+            LexHit(
+                path=r["path"],
+                snippet=r["snippet"],
+                rank=r["rank"],
+                qualified_name=r["qualified_name"],
+                line_start=r["line_start"],
+                line_end=r["line_end"],
+            )
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------
     # Search

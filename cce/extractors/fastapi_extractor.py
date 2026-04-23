@@ -22,6 +22,9 @@ from cce.walker import file_to_module_qname
 
 _PY = Language.PYTHON
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+# F-M11: ``@app.websocket("/ws")`` registers a websocket handler; treat it as a
+# route with method "WEBSOCKET" so downstream tooling can list it uniformly.
+_WS_METHOD = "websocket"
 
 
 class FastAPIExtractor:
@@ -52,6 +55,9 @@ class FastAPIExtractor:
         self._extract_routes(tree.root_node, src, rel_path, module_qname, router_vars, data)
         self._extract_pydantic_models(tree.root_node, src, rel_path, module_qname, data)
         self._extract_include_router(tree.root_node, src, rel_path, module_qname, data)
+        # F-M11: programmatic registration and mounts
+        self._extract_add_api_route(tree.root_node, src, rel_path, module_qname, router_vars, data)
+        self._extract_mounts(tree.root_node, src, rel_path, module_qname, router_vars, data)
         return data
 
     # ── Router variable discovery ─────────────────────────────────────────────
@@ -146,6 +152,7 @@ class FastAPIExtractor:
                         "path": full_path,
                         "local_path": local_path,
                         "router_var": router_var,
+                        "router_module": mod,
                         "methods": methods,
                         "response_model": response_model,
                         "handler": fn_qname,
@@ -175,10 +182,14 @@ class FastAPIExtractor:
         return prefixes
 
     def _parse_route_decorator(self, dec_node, src: bytes, router_vars: dict) -> dict | None:
-        """Parse @app.get('/path', response_model=X) → {path, methods, response_model, router_var}."""
+        """Parse @app.get('/path', response_model=X) → {path, methods, response_model, router_var}.
+
+        F-M11: also recognises ``@app.websocket("/ws")`` — the returned
+        ``methods`` list contains a single ``"WEBSOCKET"`` entry.
+        """
         dec_text = _text(dec_node, src).lstrip("@").strip()
         for var in router_vars:
-            for method in _HTTP_METHODS:
+            for method in (*_HTTP_METHODS, _WS_METHOD):
                 prefix = f"{var}.{method}"
                 if dec_text.startswith(prefix):
                     m = re.search(r"""['"]([^'"]+)['"]""", dec_text)
@@ -196,6 +207,110 @@ class FastAPIExtractor:
                         "router_var": var,
                     }
         return None
+
+    # ── add_api_route (programmatic registration) ─────────────────────────────
+
+    def _extract_add_api_route(
+        self, root, src: bytes, rel_path: str, mod: str,
+        router_vars: dict[str, dict], data: ExtractedData,
+    ) -> None:
+        """F-M11: parse ``router.add_api_route("/path", handler, methods=["GET"])``.
+
+        Emits a Route node + ROUTES_TO edge to the referenced handler symbol.
+        The handler name is captured as-is; the graph resolver reconciles it to
+        a qualified name during reference resolution.
+        """
+        full = src.decode("utf-8", errors="replace")
+        include_prefixes = self._collect_include_prefixes(root, src)
+        pattern = re.compile(
+            r"(\w+)\.add_api_route\s*\(\s*"
+            r"""['"]([^'"]+)['"]\s*,\s*"""       # path literal
+            r"(\w+)"                              # endpoint identifier
+            r"(?:\s*,\s*methods\s*=\s*\[([^\]]*)\])?",
+        )
+        for m in pattern.finditer(full):
+            router_var, path, endpoint, methods_raw = (
+                m.group(1), m.group(2), m.group(3), m.group(4) or "",
+            )
+            if router_var not in router_vars:
+                continue
+            methods = [
+                s.strip().strip("'\"").upper()
+                for s in methods_raw.split(",") if s.strip()
+            ] or ["GET"]
+            router_prefix = router_vars.get(router_var, {}).get("prefix", "")
+            include_prefix = include_prefixes.get(router_var, "")
+            full_path = _join_paths(include_prefix, router_prefix, path)
+            line = full[: m.start()].count("\n") + 1
+            qname = (
+                f"{mod}.route.{re.sub(r'[^a-zA-Z0-9_]', '_', full_path)}."
+                f"{'_'.join(methods)}"
+            )
+            route_id = _node_id_from_qname(qname)
+            handler_qname = f"{mod}.{endpoint}"
+            data.nodes.append(Node(
+                id=route_id,
+                kind=NodeKind.ROUTE,
+                qualified_name=qname,
+                name=full_path,
+                file_path=rel_path,
+                line_start=line,
+                line_end=line,
+                language=_PY,
+                framework_tag=FrameworkTag.FASTAPI,
+                meta={
+                    "path": full_path,
+                    "local_path": path,
+                    "router_var": router_var,
+                    "router_module": mod,
+                    "methods": methods,
+                    "handler": handler_qname,
+                    "registration": "add_api_route",
+                },
+            ))
+            data.raw_edges.append(RawEdge(
+                src_id=route_id,
+                dst_qualified_name=handler_qname,
+                kind=EdgeKind.ROUTES_TO,
+                file_path=rel_path,
+                line=line,
+            ))
+
+    # ── Mounts (sub-apps, static files) ──────────────────────────────────────
+
+    def _extract_mounts(
+        self, root, src: bytes, rel_path: str, mod: str,
+        router_vars: dict[str, dict], data: ExtractedData,
+    ) -> None:
+        """F-M11: parse ``app.mount("/static", StaticFiles(...))`` or sub-apps.
+
+        Emits a MOUNTS_ROUTER edge from the parent app to the mounted object.
+        The destination qualified name is ``{mod}.{target_expr}`` for local
+        bindings, or the raw callable text when the target is a call expression.
+        """
+        full = src.decode("utf-8", errors="replace")
+        pattern = re.compile(
+            r"(\w+)\.mount\s*\(\s*"
+            r"""['"]([^'"]+)['"]\s*,\s*"""       # mount path literal
+            r"([\w\.]+)",                         # sub-app identifier / dotted name
+        )
+        for m in pattern.finditer(full):
+            app_var, mount_path, target = m.group(1), m.group(2), m.group(3)
+            if app_var not in router_vars:
+                continue
+            line = full[: m.start()].count("\n") + 1
+            data.raw_edges.append(RawEdge(
+                src_id=_node_id_from_qname(f"{mod}.{app_var}"),
+                dst_qualified_name=f"{mod}.{target}",
+                kind=EdgeKind.MOUNTS_ROUTER,
+                file_path=rel_path,
+                line=line,
+                confidence=0.8,
+            ))
+            # Record the mount path on the router_prefixes dict so the indexer's
+            # cross-file pass can stamp effective_path on any routes inside the
+            # mounted sub-app.
+            data.router_prefixes[f"{mod}.{target}"] = mount_path
 
     # ── Depends extraction ────────────────────────────────────────────────────
 
@@ -258,6 +373,8 @@ class FastAPIExtractor:
                 line=line,
                 confidence=0.9,
             ))
+            if prefix:
+                data.router_prefixes[f"{mod}.{router_var}"] = prefix
 
 
 def _join_paths(*parts: str) -> str:

@@ -42,6 +42,9 @@ class AgentState(TypedDict, total=False):
     # ── Reasoner bookkeeping ──────────────────────────────────────────────────
     reasoning_steps: list[str]
     loop_count: int
+    tool_errors: int
+    # F15: coverage axes from the last reasoner turn
+    coverage_axes: dict  # {has_subject_symbol, has_symbol_body, has_callers}
 
     # ── Budget controls ───────────────────────────────────────────────────────
     # Populated from Settings.agent at graph-creation time; both have defaults.

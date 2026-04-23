@@ -162,6 +162,68 @@ def test_graph_expansion_adds_neighbors():
 
 # ── Integration: search_code uses hybrid retriever ────────────────────────────
 
+def test_get_file_slice_returns_lines(tmp_path):
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import get_file_slice  # noqa: PLC0415
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "slice.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(FIXTURES, layers=["lexical"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        result = get_file_slice("views.py", 1, 10)
+    assert result["path"] == "views.py"
+    assert len(result["lines"]) <= 10
+    assert result["start"] == 1
+
+
+def test_get_file_slice_rejects_traversal(tmp_path):
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import get_file_slice  # noqa: PLC0415
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "slice2.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(FIXTURES, layers=["lexical"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        with pytest.raises(ValueError, match="Invalid path"):
+            get_file_slice("../../etc/passwd", 1, 10)
+
+
+def test_list_tools_respect_limit(tmp_path):
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import list_symbols  # noqa: PLC0415
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "limit.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(FIXTURES, layers=["lexical", "symbols"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        syms = list_symbols(file_path="views.py", kind="Function", limit=1)
+        assert len(syms) == 1
+        # Cap at 1000
+        syms2 = list_symbols(file_path="views.py", kind="Function", limit=9999)
+        assert len(syms2) <= 1000
+
+
 def test_search_code_hybrid_mode(tmp_path):
     from cce.config import Settings  # noqa: PLC0415
     from cce.indexer import IndexPipeline  # noqa: PLC0415
@@ -180,3 +242,31 @@ def test_search_code_hybrid_mode(tmp_path):
         from cce.retrieval.tools import search_code  # noqa: PLC0415
         hits = search_code("User class", mode="lexical", k=10)
         assert isinstance(hits, list)
+
+
+# ── P0-3: grep_code tests ─────────────────────────────────────────────────────
+
+def test_grep_code_regex_metachars_and_no_matches(tmp_path):
+    from cce.config import Settings  # noqa: PLC0415
+    from cce.indexer import IndexPipeline  # noqa: PLC0415
+    from cce.retrieval.tools import grep_code  # noqa: PLC0415
+
+    settings = Settings()
+    settings.paths.sqlite_db = tmp_path / "grep.sqlite"
+    settings.paths.data_dir = tmp_path
+    settings.paths.qdrant_path = tmp_path / "qdrant"
+    settings.paths.agent_checkpoint = tmp_path / "agent.sqlite"
+
+    pipeline = IndexPipeline(settings=settings)
+    pipeline.run(FIXTURES, layers=["lexical"])
+
+    with patch("cce.retrieval.tools._pipeline", return_value=pipeline):
+        # Escaped parenthesis should not crash
+        hits = grep_code(r"def \w+\(")
+        assert isinstance(hits, list)
+        # A pattern that matches nothing should return empty list
+        hits_empty = grep_code(r"xyz_NONEXISTENT_12345")
+        assert hits_empty == []
+        # Long pattern should work
+        hits_long = grep_code(r"class User.*pass")
+        assert isinstance(hits_long, list)

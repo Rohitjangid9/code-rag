@@ -14,6 +14,7 @@ def test_get_llm_raises_without_provider():
     from cce.agents.llm import get_llm  # noqa: PLC0415
     get_llm.cache_clear()
     with patch("cce.agents.llm.get_settings") as mock_cfg:
+        mock_cfg.return_value.offline = False  # F37: explicit False so offline guard doesn't fire
         mock_cfg.return_value.agent.llm_provider = "invalid_xyz"
         with pytest.raises(ValueError, match="Unknown LLM provider"):
             get_llm()
@@ -90,7 +91,7 @@ def test_responder_node_with_mocked_llm():
     state = {"messages": [HumanMessage(content="query")], "retrieved_context": [], "reasoning_steps": []}
     mock_resp = AIMessage(content="Here is the answer: authentication is in middleware.py")
 
-    with patch("cce.agents.nodes.get_llm") as mock_llm:
+    with patch("cce.agents.nodes.get_responder_llm") as mock_llm:
         mock_llm.return_value.invoke.return_value = mock_resp
         result = responder_node(state)
 
@@ -173,3 +174,138 @@ def test_mcp_tools_call_search_code(client):
     result = resp.json()["result"]
     assert result["isError"] is False
     assert result["content"][0]["type"] == "text"
+
+
+# ── P0-4 citation validation ──────────────────────────────────────────────────
+
+def test_validate_citations_file_level():
+    from cce.agents.nodes import _validate_citations  # noqa: PLC0415
+
+    citations = [{"id": 1, "symbol": "x", "file": "x.py", "line_start": 0, "line_end": 0}]
+    answer = "See x.py:42 for details."
+    sanitised, dropped = _validate_citations(answer, citations)
+    assert "x.py:42" in sanitised
+    assert not dropped
+
+
+def test_validate_citations_out_of_range():
+    from cce.agents.nodes import _validate_citations  # noqa: PLC0415
+
+    citations = [{"id": 1, "symbol": "x", "file": "x.py", "line_start": 10, "line_end": 20}]
+    answer = "See x.py:5 and x.py:15 for details."
+    sanitised, dropped = _validate_citations(answer, citations)
+    assert "x.py:?" in sanitised
+    assert "x.py:15" in sanitised
+    assert "x.py:5" in dropped
+
+
+def test_retriever_structured_tool_error_and_reasoner_counts_it():
+    from langchain_core.messages import AIMessage, ToolMessage  # noqa: PLC0415
+    from cce.agents.nodes import retriever_node, reasoner_node  # noqa: PLC0415
+
+    # Mock a tool that always raises
+    bad_tool = MagicMock()
+    bad_tool.name = "bad_tool"
+    bad_tool.invoke.side_effect = ValueError("something broke")
+
+    with patch("cce.agents.tools.ALL_TOOLS", [bad_tool]):
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "bad_tool", "args": {}, "id": "tc-1"}]),
+            ],
+            "retrieved_context": [],
+        }
+        result = retriever_node(state)
+
+    assert "messages" in result
+    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 1
+    assert '"status": "error"' in tool_msgs[0].content
+    assert '"error_class": "ValueError"' in tool_msgs[0].content
+
+    # Feed into reasoner
+    state["messages"].extend(result["messages"])
+    reasoner_result = reasoner_node(state)
+    assert reasoner_result.get("tool_errors", 0) == 1
+    assert any("error(s)" in s for s in reasoner_result["reasoning_steps"])
+
+
+# ── P0-1: leaked tool-call parsing ────────────────────────────────────────────
+
+def test_parse_leaked_tool_calls_shape_1():
+    from cce.agents.nodes import _parse_leaked_tool_calls  # noqa: PLC0415
+
+    content = 'to=functions.search_code {"query": "auth"}'
+    calls = _parse_leaked_tool_calls(content, {"search_code"})
+    assert len(calls) == 1
+    assert calls[0]["name"] == "search_code"
+    assert calls[0]["args"]["query"] == "auth"
+
+
+def test_parse_leaked_tool_calls_shape_2():
+    from cce.agents.nodes import _parse_leaked_tool_calls  # noqa: PLC0415
+
+    content = '{"tool_uses":[{"recipient_name":"functions.search_code","parameters":{"query":"auth"}}]}'
+    calls = _parse_leaked_tool_calls(content, {"search_code"})
+    assert len(calls) == 1
+    assert calls[0]["name"] == "search_code"
+
+
+def test_parse_leaked_tool_calls_shape_3():
+    from cce.agents.nodes import _parse_leaked_tool_calls  # noqa: PLC0415
+
+    content = '{"name":"search_code","arguments":{"query":"auth"}}'
+    calls = _parse_leaked_tool_calls(content, {"search_code"})
+    assert len(calls) == 1
+    assert calls[0]["name"] == "search_code"
+
+
+def test_parse_leaked_tool_calls_empty():
+    from cce.agents.nodes import _parse_leaked_tool_calls  # noqa: PLC0415
+
+    assert _parse_leaked_tool_calls("", {"search_code"}) == []
+    assert _parse_leaked_tool_calls("no leak here", {"search_code"}) == []
+
+
+def test_parse_leaked_tool_calls_malformed():
+    from cce.agents.nodes import _parse_leaked_tool_calls  # noqa: PLC0415
+
+    content = 'to=functions.search_code {broken json'
+    calls = _parse_leaked_tool_calls(content, {"search_code"})
+    assert calls == []
+
+
+# ── P0-4: more citation validation ────────────────────────────────────────────
+
+def test_validate_citations_valid_range():
+    from cce.agents.nodes import _validate_citations  # noqa: PLC0415
+
+    citations = [{"id": 1, "symbol": "x", "file": "x.py", "line_start": 10, "line_end": 20}]
+    answer = "See x.py:15 for details."
+    sanitised, dropped = _validate_citations(answer, citations)
+    assert "x.py:15" in sanitised
+    assert not dropped
+
+
+def test_validate_citations_windows_vs_unix_path():
+    from cce.agents.nodes import _validate_citations  # noqa: PLC0415
+
+    citations = [{"id": 1, "symbol": "x", "file": "src/x.py", "line_start": 5, "line_end": 5}]
+    answer = "See x.py:5."
+    sanitised, dropped = _validate_citations(answer, citations)
+    assert "x.py:5" in sanitised
+    assert not dropped
+
+
+def test_validate_citations_multiple_in_sentence():
+    from cce.agents.nodes import _validate_citations  # noqa: PLC0415
+
+    citations = [
+        {"id": 1, "symbol": "x", "file": "x.py", "line_start": 1, "line_end": 10},
+        {"id": 2, "symbol": "y", "file": "y.py", "line_start": 5, "line_end": 5},
+    ]
+    answer = "See x.py:3 and y.py:5."
+    sanitised, dropped = _validate_citations(answer, citations)
+    assert "x.py:3" in sanitised
+    assert "y.py:5" in sanitised
+    assert not dropped

@@ -1,0 +1,60 @@
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2953.0, "ts": "2026-04-23T06:29:03.275284+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 6, "elapsed_ms": 1391.0, "ts": "2026-04-23T06:29:04.752208+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T06:29:05.666873+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T06:29:05.667873+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 3484.0, "ts": "2026-04-23T06:32:36.496776+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 7, "elapsed_ms": 1047.0, "ts": "2026-04-23T06:32:37.580582+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T06:32:39.354004+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T06:32:39.355508+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 3250.0, "ts": "2026-04-23T06:33:13.416299+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 8, "elapsed_ms": 937.0, "ts": "2026-04-23T06:33:14.404112+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T06:33:16.892308+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T06:33:16.893306+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 6438.0, "ts": "2026-04-23T08:16:54.467682+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 9, "elapsed_ms": 1031.0, "ts": "2026-04-23T08:16:55.653669+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T08:16:56.893029+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:16:56.894034+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2703.0, "ts": "2026-04-23T08:19:26.674570+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 10, "elapsed_ms": 1421.0, "ts": "2026-04-23T08:19:28.137378+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 16.0, "error": "something broke", "ts": "2026-04-23T08:19:29.288795+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:19:29.289801+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 4172.0, "ts": "2026-04-23T08:42:58.979281+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 11, "elapsed_ms": 1187.0, "ts": "2026-04-23T08:43:00.301116+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T08:43:01.770838+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:43:01.771372+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 3359.0, "ts": "2026-04-23T08:51:15.709410+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 12, "elapsed_ms": 969.0, "ts": "2026-04-23T08:51:16.736645+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T08:51:17.855246+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:51:17.856274+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2719.0, "ts": "2026-04-23T08:52:39.606186+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 13, "elapsed_ms": 953.0, "ts": "2026-04-23T08:52:40.613196+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T08:52:42.009605+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:52:42.011119+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2781.0, "ts": "2026-04-23T08:53:13.472624+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 14, "elapsed_ms": 1000.0, "ts": "2026-04-23T08:53:14.533506+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 15.0, "error": "something broke", "ts": "2026-04-23T08:53:15.615914+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T08:53:15.617444+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2922.0, "ts": "2026-04-23T09:05:16.694701+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 15, "elapsed_ms": 907.0, "ts": "2026-04-23T09:05:17.646028+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T09:05:19.409324+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:05:19.411067+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 3031.0, "ts": "2026-04-23T09:07:42.000068+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 16, "elapsed_ms": 750.0, "ts": "2026-04-23T09:07:42.777695+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T09:07:44.292265+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:07:44.293771+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 3156.0, "ts": "2026-04-23T09:09:24.117628+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 17, "elapsed_ms": 1187.0, "ts": "2026-04-23T09:09:25.354898+00:00"}
+{"node": "retriever", "thread_id": "how is auth handled?", "turn": 18, "tool": "search_code", "args": {"query": "auth middleware", "mode": "hybrid", "k": 5}, "hits": 5, "elapsed_ms": 4750.0, "ts": "2026-04-23T09:09:30.108256+00:00"}
+{"node": "reasoner", "thread_id": "how is auth handled?", "turn": 18, "tool_errors": 0, "coverage": {"has_subject_symbol": true, "has_symbol_body": true, "has_callers": true}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:09:30.110260+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T09:09:32.755877+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:09:32.757475+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 4312.0, "ts": "2026-04-23T09:17:07.445530+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 18, "elapsed_ms": 1500.0, "ts": "2026-04-23T09:17:09.118084+00:00"}
+{"node": "retriever", "thread_id": "how is auth handled?", "turn": 19, "tool": "get_symbol", "args": {"qualified_name": "django_extractor.DjangoExtractor._extract_middleware"}, "hits": 0, "elapsed_ms": 0.0, "ts": "2026-04-23T09:17:09.125246+00:00"}
+{"node": "reasoner", "thread_id": "how is auth handled?", "turn": 19, "tool_errors": 0, "coverage": {"has_subject_symbol": true, "has_symbol_body": true, "has_callers": true}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:17:09.128391+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T09:17:10.355593+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:17:10.357097+00:00"}
+{"node": "planner", "thread_id": "where is authentication handled?", "turn": 0, "elapsed_ms": 2594.0, "ts": "2026-04-23T09:17:35.744208+00:00"}
+{"node": "planner", "thread_id": "how is auth handled?", "turn": 19, "elapsed_ms": 1562.0, "ts": "2026-04-23T09:17:37.360450+00:00"}
+{"node": "retriever", "thread_id": "", "turn": 0, "tool": "bad_tool", "args": {}, "hits": 0, "elapsed_ms": 0.0, "error": "something broke", "ts": "2026-04-23T09:17:38.747142+00:00"}
+{"node": "reasoner", "thread_id": "", "turn": 0, "tool_errors": 1, "coverage": {"has_subject_symbol": false, "has_symbol_body": false, "has_callers": false}, "elapsed_ms": 0.0, "ts": "2026-04-23T09:17:38.749176+00:00"}

@@ -16,10 +16,12 @@ import uuid as _uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from cce.agents.llm import get_llm, get_responder_system_message, get_system_message
+from cce.agents.llm import get_llm, get_planner_llm, get_responder_llm, get_responder_system_message, get_system_message
 from cce.agents.state import AgentState
+from cce.agents.trace import emit as _trace_emit, start_timer as _trace_timer
 from cce.config import get_settings
 from cce.logging import get_logger
+from cce.telemetry import get_tracer
 
 log = get_logger(__name__)
 
@@ -219,24 +221,77 @@ def _debug_log_ai_message(response: AIMessage) -> None:
     )
 
 
+# ── F16: Tool-result summarization ───────────────────────────────────────────
+
+def _summarize_old_tool_messages(messages: list) -> list:
+    """Replace all but the last ToolMessage with a compact one-line summary.
+
+    Keeps the most-recent ToolMessage verbatim (the planner needs fresh detail)
+    and compresses older ones to ``"<tool>: N hits, top=[…]"`` so the context
+    window stops growing unboundedly across loops.
+    """
+    # Identify indices of ToolMessage objects
+    tool_idxs = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
+    if len(tool_idxs) <= 1:
+        return messages  # nothing to compress
+
+    to_compress = set(tool_idxs[:-1])  # keep last one intact
+    out: list = []
+    for i, msg in enumerate(messages):
+        if i not in to_compress:
+            out.append(msg)
+            continue
+        # Build a one-line summary from the ToolMessage content
+        raw = getattr(msg, "content", "") or ""
+        try:
+            data = _json.loads(raw)
+            if isinstance(data, list):
+                summary = f"{len(data)} hits, top={[str(d)[:60] for d in data[:3]]}"
+            elif isinstance(data, dict):
+                status = data.get("status", "ok")
+                summary = f"status={status} keys={list(data.keys())[:5]}"
+            else:
+                summary = str(raw)[:120]
+        except Exception:  # noqa: BLE001
+            summary = str(raw)[:120]
+        out.append(ToolMessage(
+            content=f"(summarised) {summary}",
+            tool_call_id=getattr(msg, "tool_call_id", ""),
+        ))
+    return out
+
+
 # ── Planner — LLM decides which tools to call ────────────────────────────────
 
 def planner_node(state: AgentState) -> AgentState:
     """Invoke the LLM (with tools bound). Emits tool_calls or a plain text reply."""
     from cce.agents.tools import ALL_TOOLS  # noqa: PLC0415
 
+    _t = _trace_timer()
+    thread_id = state.get("query", "")[:32]
+    turn = state.get("loop_count", 0)
+
     messages = list(state.get("messages", []))
     if not messages:
         messages = [HumanMessage(content=state.get("query", ""))]
     messages = _trim_messages(messages)
 
+    # F16: summarize older ToolMessages to keep context window small
+    messages = _summarize_old_tool_messages(messages)
+
     fallback_hits: list = []
-    try:
-        llm = get_llm().bind_tools(ALL_TOOLS)
-        response: AIMessage = llm.invoke([get_system_message()] + messages)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("LLM call failed (%s) — falling back to direct hybrid search", exc)
-        response, fallback_hits = _fallback_search(state.get("query", ""))
+    error_detail: str | None = None
+    with get_tracer().start_as_current_span("cce.planner") as span:  # F33
+        span.set_attribute("thread_id", thread_id)
+        span.set_attribute("turn", turn)
+        try:
+            llm = get_planner_llm().bind_tools(ALL_TOOLS)
+            response: AIMessage = llm.invoke([get_system_message()] + messages)
+        except Exception as exc:  # noqa: BLE001
+            error_detail = str(exc)
+            span.record_exception(exc)
+            log.warning("LLM call failed (%s) — falling back to direct hybrid search", exc)
+            response, fallback_hits = _fallback_search(state.get("query", ""))
 
     # P0-1: tool-call sanity — recover tool calls leaked into content.
     _debug_log_ai_message(response)
@@ -252,6 +307,11 @@ def planner_node(state: AgentState) -> AgentState:
             response = AIMessage(
                 content="(planner emitted malformed tool-call text; no retrieval this turn)"
             )
+
+    _trace_emit({
+        "node": "planner", "thread_id": thread_id, "turn": turn,
+        "elapsed_ms": _t(), **({"error": error_detail} if error_detail else {}),
+    })
 
     update: dict = {
         "messages": [response],
@@ -292,19 +352,33 @@ def retriever_node(state: AgentState) -> AgentState:
     if not isinstance(last, AIMessage) or not getattr(last, "tool_calls", None):
         return {}
 
+    thread_id = state.get("query", "")[:32]
+    turn = state.get("loop_count", 0)
     tool_map = {t.name: t for t in ALL_TOOLS}
     tool_messages: list[ToolMessage] = []
     retrieved: list = list(state.get("retrieved_context", []))
 
     for call in last.tool_calls:
+        _t = _trace_timer()
         tool = tool_map.get(call["name"])
+        error_detail: str | None = None
+        hits_count = 0
         try:
             result = tool.invoke(call["args"]) if tool else f"Unknown tool: {call['name']}"
             if isinstance(result, list):
+                hits_count = len(result)
                 retrieved.extend(result)
         except Exception as exc:  # noqa: BLE001
-            result = f"Tool error: {exc}"
-        tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+            error_detail = str(exc)
+            result = {"status": "error", "error_class": type(exc).__name__, "message": str(exc)}
+        content = _json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+        tool_messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
+        _trace_emit({
+            "node": "retriever", "thread_id": thread_id, "turn": turn,
+            "tool": call["name"], "args": call.get("args", {}),
+            "hits": hits_count, "elapsed_ms": _t(),
+            **({"error": error_detail} if error_detail else {}),
+        })
 
     return {"messages": tool_messages, "retrieved_context": _dedup_context(retrieved)}
 
@@ -312,10 +386,59 @@ def retriever_node(state: AgentState) -> AgentState:
 # ── Reasoner — decide if we have enough context ───────────────────────────────
 
 def reasoner_node(state: AgentState) -> AgentState:
-    """Append a reasoning step; loop gate handled by should_continue."""
+    """Append a reasoning step; loop gate handled by should_continue.
+
+    F15: scores the retrieved context on three coverage axes and forces another
+    planning loop when any required axis is missing and retries remain.
+    """
+    _t = _trace_timer()
+    thread_id = state.get("query", "")[:32]
+    turn = state.get("loop_count", 0)
+
     steps = list(state.get("reasoning_steps", []))
-    steps.append(f"loop {state.get('loop_count', 0)}: {len(state.get('retrieved_context', []))} items retrieved")
-    return {"reasoning_steps": steps}
+    context = state.get("retrieved_context", [])
+    steps.append(f"loop {turn}: {len(context)} items retrieved")
+
+    # Count structured tool errors from the last retriever turn
+    tool_errors = 0
+    for msg in state.get("messages", []):
+        if isinstance(msg, ToolMessage):
+            content = getattr(msg, "content", "") or ""
+            if content.startswith('{"status": "error"'):
+                tool_errors += 1
+
+    if tool_errors:
+        steps.append(f"tools returned {tool_errors} error(s) — retrying")
+
+    # F15: coverage-axis scoring
+    has_subject_symbol = any(
+        (isinstance(it, dict) and (it.get("node") or {}).get("qualified_name"))
+        or (not isinstance(it, dict) and getattr(getattr(it, "node", None), "qualified_name", None))
+        for it in context
+    )
+    has_symbol_body = any(
+        (isinstance(it, dict) and it.get("snippet") and len(str(it.get("snippet", ""))) > 50)
+        or (not isinstance(it, dict) and len(getattr(it, "snippet", "") or "") > 50)
+        for it in context
+    )
+    has_callers = len(context) >= 2  # rough proxy: ≥2 hits suggests caller context
+
+    coverage = {
+        "has_subject_symbol": has_subject_symbol,
+        "has_symbol_body": has_symbol_body,
+        "has_callers": has_callers,
+    }
+    missing_axes = [k for k, v in coverage.items() if not v]
+    if missing_axes:
+        steps.append(f"coverage gaps: {', '.join(missing_axes)}")
+
+    _trace_emit({
+        "node": "reasoner", "thread_id": thread_id, "turn": turn,
+        "tool_errors": tool_errors, "coverage": coverage,
+        "elapsed_ms": _t(),
+    })
+
+    return {"reasoning_steps": steps, "tool_errors": tool_errors, "coverage_axes": coverage}
 
 
 # ── Responder — synthesize final answer ───────────────────────────────────────
@@ -409,6 +532,9 @@ def _validate_citations(answer: str, citations: list[dict]) -> tuple[str, list[s
         for f, ranges in valid_by_file.items():
             if file == f or f.endswith("/" + file) or file.endswith("/" + f):
                 for ls, le in ranges:
+                    # Whole-file citation fallback (lexical hits with no line range).
+                    if ls == 0 and le == 0:
+                        return True
                     if ls <= line <= max(le, ls):
                         return True
         return False
@@ -455,12 +581,15 @@ def responder_node(state: AgentState) -> AgentState:
     prompt.append(SystemMessage(content=f"CITATION TABLE (the only citations you may use):\n{citation_block}"))
     prompt.extend(messages)
 
-    try:
-        llm = get_llm()
-        final: AIMessage = llm.invoke(prompt)
-        answer = final.content
-    except Exception:  # noqa: BLE001
-        answer = messages[-1].content if messages else "No answer."
+    with get_tracer().start_as_current_span("cce.responder") as span:  # F33
+        span.set_attribute("context_items", len(context))
+        try:
+            llm = get_responder_llm()
+            final: AIMessage = llm.invoke(prompt)
+            answer = final.content
+        except Exception as exc:  # noqa: BLE001
+            span.record_exception(exc)
+            answer = messages[-1].content if messages else "No answer."
 
     if get_settings().agent.strict_citations and isinstance(answer, str):
         sanitised, dropped = _validate_citations(answer, citations)
@@ -488,8 +617,22 @@ def has_tool_calls(state: AgentState) -> str:
 
 
 def should_continue(state: AgentState) -> str:
-    """After retriever+reasoner: loop back to planner unless loop cap is reached."""
+    """After retriever+reasoner: loop back to planner unless loop cap is reached.
+
+    F15: forces another loop when coverage axes are incomplete (no subject symbol,
+    no body, no callers) and retries remain.  Always continues when there were
+    tool errors so the planner can recover.
+    """
     settings = get_settings()
-    if state.get("loop_count", 0) >= settings.agent.max_retrieval_loops:
+    loop_count = state.get("loop_count", 0)
+    max_loops = settings.agent.max_retrieval_loops
+    if loop_count >= max_loops:
         return "respond"
+    # Tool errors — must retry
+    if state.get("tool_errors", 0) > 0:
+        return "plan"
+    # F15: coverage-axis check — loop if any axis is missing
+    axes = state.get("coverage_axes") or {}
+    if axes and not all(axes.values()):
+        return "plan"
     return "plan"

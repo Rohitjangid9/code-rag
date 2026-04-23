@@ -138,6 +138,9 @@ def resolve_python_file(parsed: ParsedFile, root: Path) -> list[RawEdge]:
             if d.module_path is None:
                 continue
             callee_qname = _jedi_def_to_qname(d, root)
+            if _jedi_debug and not calls_found:
+                log.debug("  qname_trace: d.name=%s module_path=%s root=%s -> callee_qname=%s caller_qname=%s",
+                          d.name, d.module_path, root, callee_qname, caller_qname)
             if callee_qname and callee_qname != caller_qname:
                 log.debug(
                     "CALLS  %s -> %s  @ line %d",
